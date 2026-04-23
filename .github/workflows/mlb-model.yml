@@ -2,9 +2,9 @@ name: MLB Betting Model — Daily Run
 
 on:
   schedule:
-    - cron: '0 13 * * *'   # 9AM Eastern
-    - cron: '0 16 * * *'   # 12PM Eastern
-    - cron: '0 21 * * *'   # 5PM Eastern
+    - cron: '0 13 * * *'
+    - cron: '0 16 * * *'
+    - cron: '0 21 * * *'
   workflow_dispatch:
 
 jobs:
