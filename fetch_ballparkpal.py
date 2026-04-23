@@ -1,107 +1,47 @@
-import pandas as pd
+import requests
+import datetime
 import os
+import sys
+import pandas as pd
 
-# BP abbreviation → MLB Stats API full team name
-ABBR_TO_FULLNAME = {
-    "ARI": "Arizona Diamondbacks",
-    "ATL": "Atlanta Braves",
-    "BAL": "Baltimore Orioles",
-    "BOS": "Boston Red Sox",
-    "CHC": "Chicago Cubs",
-    "CHW": "Chicago White Sox",
-    "CIN": "Cincinnati Reds",
-    "CLE": "Cleveland Guardians",
-    "COL": "Colorado Rockies",
-    "DET": "Detroit Tigers",
-    "HOU": "Houston Astros",
-    "KC":  "Kansas City Royals",
-    "LAA": "Los Angeles Angels",
-    "LAD": "Los Angeles Dodgers",
-    "MIA": "Miami Marlins",
-    "MIL": "Milwaukee Brewers",
-    "MIN": "Minnesota Twins",
-    "NYM": "New York Mets",
-    "NYY": "New York Yankees",
-    "OAK": "Oakland Athletics",
-    "ATH": "Oakland Athletics",
-    "PHI": "Philadelphia Phillies",
-    "PIT": "Pittsburgh Pirates",
-    "SD":  "San Diego Padres",
-    "SF":  "San Francisco Giants",
-    "SEA": "Seattle Mariners",
-    "STL": "St. Louis Cardinals",
-    "TB":  "Tampa Bay Rays",
-    "TEX": "Texas Rangers",
-    "TOR": "Toronto Blue Jays",
-    "WAS": "Washington Nationals",
-}
+EMAIL    = os.environ["BP_EMAIL"]
+PASSWORD = os.environ["BP_PASSWORD"]
+DATE     = datetime.date.today().strftime("%Y-%m-%d")
 
-def load_bp_games(filepath="ballparkpal_games.xlsx") -> dict:
-    if not os.path.exists(filepath):
-        print(f"  ⚠️  BallparkPal file not found: {filepath}")
-        return {}
-    try:
-        df = pd.read_excel(filepath, engine="openpyxl")
-        print(f"  📊 Loaded BP data: {len(df)} games")
-    except Exception as e:
-        print(f"  ⚠️  Could not read BP file: {e}")
-        return {}
+LOGIN_URL  = "https://www.ballparkpal.com/LogIn.php"
+EXPORT_URL = f"https://www.ballparkpal.com/ExportGames.php?date={DATE}"
 
-    games = {}
-    for _, row in df.iterrows():
-        try:
-            away_abbr = str(row.get("AwayTeam", "")).strip()
-            home_abbr = str(row.get("HomeTeam", "")).strip()
-            if not away_abbr or not home_abbr:
-                continue
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://www.ballparkpal.com/LogIn.php",
+})
 
-            def safe(col, scale=1.0):
-                val = row.get(col)
-                if val is None or (isinstance(val, float) and pd.isna(val)):
-                    return None
-                try:
-                    return round(float(val) * scale, 3)
-                except:
-                    return None
+print("🔐 Logging into BallparkPal...")
+login = session.post(LOGIN_URL, data={
+    "email":    EMAIL,
+    "password": PASSWORD,
+    "login":    "Sign In",
+}, allow_redirects=True)
 
-            bp = {
-                "bp_away_runs": safe("RunsAway"),
-                "bp_home_runs": safe("RunsHome"),
-                "bp_f5_away":   safe("RunsFirst5Away"),
-                "bp_f5_home":   safe("RunsFirst5Home"),
-                "bp_yrfi_pct":  safe("RunsFirstInningPct", scale=100.0),
-            }
+if "sign out" not in login.text.lower():
+    print("❌ Login failed")
+    sys.exit(1)
 
-            # Store by full team names (what mlb_model.py uses)
-            away_full = ABBR_TO_FULLNAME.get(away_abbr, away_abbr)
-            home_full = ABBR_TO_FULLNAME.get(home_abbr, home_abbr)
+print("✅ Logged in!")
+print(f"📥 Downloading games for {DATE}...")
+response = session.get(EXPORT_URL)
 
-            key = f"{away_full}@{home_full}"
-            games[key] = bp
-            print(f"  📌 Mapped: {away_abbr}→{away_full} vs {home_abbr}→{home_full} | Runs: {bp['bp_away_runs']}/{bp['bp_home_runs']}")
+with open("ballparkpal_games.xlsx", "wb") as f:
+    f.write(response.content)
 
-        except Exception as e:
-            print(f"  ⚠️  Row error: {e}")
-            continue
+print(f"✅ Saved ballparkpal_games.xlsx ({len(response.content):,} bytes)")
 
-    print(f"  ✅ BP data ready for {len(games)} games")
-    return games
-
-
-def get_bp_for_game(bp_games: dict, away_team: str, home_team: str) -> dict:
-    if not bp_games:
-        return {}
-
-    key = f"{away_team}@{home_team}"
-    if key in bp_games:
-        print(f"  ✅ BP match found: {key}")
-        return bp_games[key]
-
-    # Fuzzy match
-    for k, v in bp_games.items():
-        parts = k.split("@")
-        if len(parts) == 2:
-            if away_team.lower() in parts[0].lower() or parts[0].lower() in away_team.lower():
-                if home_team.lower() in parts[1].lower() or parts[1].lower() in home_team.lower():
-                    print(f"  ✅ BP fuzzy match: {k}")
-                    return
+# DEBUG — print exactly what's in the file
+print("\n🔍 DEBUG — BP file contents:")
+df = pd.read_excel("ballparkpal_games.xlsx", engine="openpyxl")
+print(f"  Columns: {list(df.columns)}")
+print(f"  Rows: {len(df)}")
+print("\n  First 3 rows:")
+for _, row in df.head(3).iterrows():
+    print(f"    Away={row.get('AwayTeam')} Home={row.get('HomeTeam')} Runs={row.get('RunsAway')}/{row.get('RunsHome')}")
