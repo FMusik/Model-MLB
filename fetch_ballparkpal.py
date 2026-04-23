@@ -2,14 +2,15 @@ import requests
 import datetime
 import os
 import sys
-import pandas as pd
 
 EMAIL    = os.environ["BP_EMAIL"]
 PASSWORD = os.environ["BP_PASSWORD"]
 DATE     = datetime.date.today().strftime("%Y-%m-%d")
 
-LOGIN_URL  = "https://www.ballparkpal.com/LogIn.php"
-EXPORT_URL = f"https://www.ballparkpal.com/ExportGames.php?date={DATE}"
+LOGIN_URL    = "https://www.ballparkpal.com/LogIn.php"
+GAMES_URL    = f"https://www.ballparkpal.com/ExportGames.php?date={DATE}"
+PITCHERS_URL = f"https://www.ballparkpal.com/ExportPitchers.php?date={DATE}"
+TEAMS_URL    = f"https://www.ballparkpal.com/ExportTeams.php?date={DATE}"
 
 session = requests.Session()
 session.headers.update({
@@ -29,19 +30,17 @@ if "sign out" not in login.text.lower():
     sys.exit(1)
 
 print("✅ Logged in!")
-print(f"📥 Downloading games for {DATE}...")
-response = session.get(EXPORT_URL)
 
-with open("ballparkpal_games.xlsx", "wb") as f:
-    f.write(response.content)
-
-print(f"✅ Saved ballparkpal_games.xlsx ({len(response.content):,} bytes)")
-
-# DEBUG — print exactly what's in the file
-print("\n🔍 DEBUG — BP file contents:")
-df = pd.read_excel("ballparkpal_games.xlsx", engine="openpyxl")
-print(f"  Columns: {list(df.columns)}")
-print(f"  Rows: {len(df)}")
-print("\n  First 3 rows:")
-for _, row in df.head(3).iterrows():
-    print(f"    Away={row.get('AwayTeam')} Home={row.get('HomeTeam')} Runs={row.get('RunsAway')}/{row.get('RunsHome')}")
+for url, filename in [
+    (GAMES_URL,    "ballparkpal_games.xlsx"),
+    (PITCHERS_URL, "ballparkpal_pitchers.xlsx"),
+    (TEAMS_URL,    "ballparkpal_teams.xlsx"),
+]:
+    print(f"📥 Downloading {filename}...")
+    r = session.get(url)
+    if r.status_code == 200:
+        with open(filename, "wb") as f:
+            f.write(r.content)
+        print(f"✅ Saved {filename} ({len(r.content):,} bytes)")
+    else:
+        print(f"⚠️  Failed {filename}: {r.status_code}")
