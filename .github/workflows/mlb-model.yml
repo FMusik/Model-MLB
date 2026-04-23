@@ -22,11 +22,17 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install MLB-StatsAPI gspread google-auth pandas requests
+          pip install MLB-StatsAPI gspread google-auth pandas requests openpyxl
 
       - name: Write credentials file
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Fetch BallparkPal data
+        env:
+          BP_EMAIL: ${{ secrets.BP_EMAIL }}
+          BP_PASSWORD: ${{ secrets.BP_PASSWORD }}
+        run: python fetch_ballparkpal.py
 
       - name: Run MLB model
         run: python mlb_model.py
