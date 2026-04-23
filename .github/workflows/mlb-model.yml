@@ -2,10 +2,10 @@ name: MLB Betting Model — Daily Run
 
 on:
   schedule:
-    - cron: '0 13 * * *'   # 9AM Eastern (1PM UTC)
-    - cron: '0 16 * * *'   # 12PM Eastern (4PM UTC)
-    - cron: '0 21 * * *'   # 5PM Eastern (9PM UTC)
-  workflow_dispatch:        # lets you run it manually anytime
+    - cron: '0 13 * * *'   # 9AM Eastern
+    - cron: '0 16 * * *'   # 12PM Eastern
+    - cron: '0 21 * * *'   # 5PM Eastern
+  workflow_dispatch:
 
 jobs:
   run-model:
@@ -13,10 +13,10 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
