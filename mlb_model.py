@@ -4201,10 +4201,6 @@ def main():
     print("\n⚙️  Loading calibration weights...")
     load_calibration(sheet)
 
-    # Load BallparkPal XLSX data
-    global _bp_games
-    _bp_games = load_bp_games("ballparkpal_games.xlsx")
-
     # Create input tab if it doesn't exist
     create_input_tab(sheet)
 
