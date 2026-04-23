@@ -1,8 +1,3 @@
-"""
-fetch_ballparkpal.py
-Logs into BallparkPal and downloads today's game export.
-Saves as ballparkpal_games.xlsx in the current directory.
-"""
 import requests
 import datetime
 import os
@@ -12,25 +7,30 @@ EMAIL    = os.environ["BP_EMAIL"]
 PASSWORD = os.environ["BP_PASSWORD"]
 DATE     = datetime.date.today().strftime("%Y-%m-%d")
 
-LOGIN_URL  = "https://www.ballparkpal.com/login.php"
+LOGIN_URL  = "https://www.ballparkpal.com/LogIn.php"
 EXPORT_URL = f"https://www.ballparkpal.com/ExportGames.php?date={DATE}"
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://www.ballparkpal.com/LogIn.php",
 })
 
-print(f"🔐 Logging into BallparkPal...")
+print("🔐 Logging into BallparkPal...")
 login = session.post(LOGIN_URL, data={
     "email":    EMAIL,
-    "password": PASSWORD
-})
+    "password": PASSWORD,
+    "login":    "Sign In",
+}, allow_redirects=True)
 
-if "Sign out" not in login.text and "sign-out" not in login.text.lower():
-    print("❌ Login failed — check BP_EMAIL and BP_PASSWORD secrets")
+print(f"   Status: {login.status_code} | URL: {login.url}")
+
+if "sign out" not in login.text.lower() and "logout" not in login.text.lower():
+    print("❌ Login failed")
+    print(f"   Response snippet: {login.text[500:800]}")
     sys.exit(1)
 
-print(f"✅ Logged in!")
+print("✅ Logged in!")
 print(f"📥 Downloading games for {DATE}...")
 
 response = session.get(EXPORT_URL)
