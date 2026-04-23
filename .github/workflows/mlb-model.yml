@@ -22,7 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install mlbstatsapi gspread google-auth pandas requests
+          pip install MLB-StatsAPI gspread google-auth pandas requests
 
       - name: Write credentials file
         run: |
