@@ -3163,8 +3163,10 @@ def analyze_game(game: dict) -> dict:
     weather_factor = get_weather_factor(info["weather_temp"], info["weather_wind"])
 
     print(f"  🏟️  PARK FACTOR COMPARISON — {info['venue']}")
-    print(f"       BallparkPal:  {f"{pf_all['bp']:.3f}x" if pf_all['bp'] else 'N/A':>8}  (today weather-adjusted)")
-    print(f"       Statcast:     {f"{pf_all['fg']:.3f}x" if pf_all['fg'] else 'N/A':>8}  (2026 3yr avg)")
+bp_str = f"{pf_all['bp']:.3f}x" if pf_all['bp'] else 'N/A'
+    fg_str = f"{pf_all['fg']:.3f}x" if pf_all['fg'] else 'N/A'
+    print(f"       BallparkPal:  {bp_str:>8}  (today weather-adjusted)")
+    print(f"       Statcast:     {fg_str:>8}  (2026 3yr avg)")
     print(f"       Static Table: {pf_all['static']:.3f}x  (historical baseline)")
     print(f"       {'─'*41}")
     print(f"       BLENDED:      {pf_all['blended']:.3f}x  ({pf_all['source']})")
