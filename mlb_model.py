@@ -2424,7 +2424,7 @@ def score_signal(our_prob: float, market_odds: int,
 
     # Negative edge = fade regardless
     if edge <= -EDGE_THRESHOLD:
-        return "❌ FADE", 0, edge
+        return "❌ FADE", round(edge), edge
 
     # Factor 1 — Probability score
     if our_prob >= 0.65:
