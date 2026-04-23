@@ -1,0 +1,32 @@
+name: MLB Betting Model — Daily Run
+
+on:
+  schedule:
+    - cron: '0 13 * * *'   # 9AM Eastern (1PM UTC)
+    - cron: '0 16 * * *'   # 12PM Eastern (4PM UTC)
+    - cron: '0 21 * * *'   # 5PM Eastern (9PM UTC)
+  workflow_dispatch:        # lets you run it manually anytime
+
+jobs:
+  run-model:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install mlbstatsapi gspread google-auth pandas requests
+
+      - name: Write credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run MLB model
+        run: python mlb_model.py
