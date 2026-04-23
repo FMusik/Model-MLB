@@ -21,6 +21,7 @@ import requests
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from read_ballparkpal import load_bp_games, get_bp_for_game
 
 # ─────────────────────────────────────────────
 # CONFIG — edit these
@@ -33,6 +34,8 @@ ODDS_API_KEY      = "c81ff126c5a86a502a0dea2fbb7f9b43"  # The Odds API key
 
 # Global sheet reference — set in main()
 _current_sheet = None
+# Global BallparkPal data — loaded once at startup
+_bp_games = {}
 
 # ─────────────────────────────────────────────
 # THE ODDS API — AUTO FETCH ODDS
@@ -3208,14 +3211,21 @@ def analyze_game(game: dict) -> dict:
 
     if sheet_market:
         print(f"  📥 Read input from Google Sheet for {game_name}")
-        if sheet_bp and sheet_bp.get("bp_away_runs"):
-            print(f"     ✅ BallparkPal data found in sheet")
         market = sheet_market
         bp     = sheet_bp or {}
     else:
-        print(f"  ⌨️  No sheet data found — entering manually...")
-        market = manual_input_prompt(info["away_team"], info["home_team"])
-        bp     = ballparkpal_input_prompt(info["away_team"], info["home_team"])
+        print(f"  ⌨️  No sheet data found — using empty market data")
+        market = {}
+        bp     = {}
+
+    # Always try to enrich BP data from downloaded XLSX
+    bp_xlsx = get_bp_for_game(_bp_games, info["away_team"], info["home_team"])
+    if bp_xlsx:
+        print(f"     ✅ BallparkPal XLSX data found — merging")
+        # XLSX data fills any missing BP fields
+        for k, v in bp_xlsx.items():
+            if v is not None and bp.get(k) is None:
+                bp[k] = v
 
     # Store API-only projection for comparison
     api_only_away  = runs["away_proj_runs"]
@@ -4184,6 +4194,10 @@ def main():
     # Load R calibration weights
     print("\n⚙️  Loading calibration weights...")
     load_calibration(sheet)
+
+    # Load BallparkPal XLSX data
+    global _bp_games
+    _bp_games = load_bp_games("ballparkpal_games.xlsx")
 
     # Create input tab if it doesn't exist
     create_input_tab(sheet)
