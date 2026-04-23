@@ -35,91 +35,121 @@ ABBR_TO_FULLNAME = {
     "WAS": "Washington Nationals",
 }
 
-def safe_float(val, scale=1.0):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
+
+def safe_val(val, scale=1.0):
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
         return None
     try:
         return round(float(val) * scale, 3)
-    except:
+    except Exception:
         return None
 
-def load_bp_games(filepath="ballparkpal_games.xlsx") -> dict:
-    if not os.path.exists(filepath):
-        print(f"  ⚠️  BP games file not found")
-        return {}
-    try:
-        df = pd.read_excel(filepath, engine="openpyxl")
-    except Exception as e:
-        print(f"  ⚠️  Could not read BP games: {e}")
-        return {}
 
+def make_key(away_abbr, home_abbr):
+    away_full = ABBR_TO_FULLNAME.get(away_abbr, away_abbr)
+    home_full = ABBR_TO_FULLNAME.get(home_abbr, home_abbr)
+    return f"{away_full}@{home_full}", away_full, home_full
+
+
+def load_bp_games(filepath="ballparkpal_games.xlsx"):
+    if not os.path.exists(filepath):
+        print("  WARNING: BP games file not found")
+        return {}
+    df = pd.read_excel(filepath, engine="openpyxl")
     games = {}
     for _, row in df.iterrows():
-        try:
-            away_abbr = str(row.get("AwayTeam", "")).strip()
-            home_abbr = str(row.get("HomeTeam", "")).strip()
-            if not away_abbr or not home_abbr:
-                continue
-
-            away_full = ABBR_TO_FULLNAME.get(away_abbr, away_abbr)
-            home_full = ABBR_TO_FULLNAME.get(home_abbr, home_abbr)
-
-            bp = {
-                "bp_away_runs": safe_float(row.get("RunsAway")),
-                "bp_home_runs": safe_float(row.get("RunsHome")),
-                "bp_f5_away":   safe_float(row.get("RunsFirst5Away")),
-                "bp_f5_home":   safe_float(row.get("RunsFirst5Home")),
-                "bp_yrfi_pct":  safe_float(row.get("RunsFirstInningPct"), scale=100.0),
-            }
-
-            key = f"{away_full}@{home_full}"
-            games[key] = bp
-            print(f"  📌 Mapped: {away_abbr}→{away_full} vs {home_abbr}→{home_full} | Runs: {bp['bp_away_runs']}/{bp['bp_home_runs']}")
-
-        except Exception as e:
+        away_abbr = str(row.get("AwayTeam", "")).strip()
+        home_abbr = str(row.get("HomeTeam", "")).strip()
+        if not away_abbr or not home_abbr:
             continue
-
-    print(f"  ✅ BP data ready for {len(games)} games")
+        key, away_full, home_full = make_key(away_abbr, home_abbr)
+        games[key] = {
+            "bp_away_runs": safe_val(row.get("RunsAway")),
+            "bp_home_runs": safe_val(row.get("RunsHome")),
+            "bp_f5_away":   safe_val(row.get("RunsFirst5Away")),
+            "bp_f5_home":   safe_val(row.get("RunsFirst5Home")),
+            "bp_yrfi_pct":  safe_val(row.get("RunsFirstInningPct"), scale=100.0),
+        }
+        print(f"  Mapped: {away_abbr} vs {home_abbr} | Runs: {games[key]['bp_away_runs']}/{games[key]['bp_home_runs']}")
+    print(f"  BP games ready: {len(games)}")
     return games
 
 
-def load_bp_pitchers(filepath="ballparkpal_pitchers.xlsx") -> dict:
-    """
-    Returns dict keyed by game (away@home) with pitcher stats.
-    Side = A (away pitcher) or H (home pitcher)
-    """
+def load_bp_pitchers(filepath="ballparkpal_pitchers.xlsx"):
     if not os.path.exists(filepath):
-        print(f"  ⚠️  BP pitchers file not found")
+        print("  WARNING: BP pitchers file not found")
         return {}
-    try:
-        df = pd.read_excel(filepath, engine="openpyxl")
-    except Exception as e:
-        print(f"  ⚠️  Could not read BP pitchers: {e}")
-        return {}
-
+    df = pd.read_excel(filepath, engine="openpyxl")
     pitchers = {}
     for _, row in df.iterrows():
-        try:
-            team     = str(row.get("Team", "")).strip()
-            opponent = str(row.get("Opponent", "")).strip()
-            side     = str(row.get("Side", "")).strip()
+        team     = str(row.get("Team", "")).strip()
+        opponent = str(row.get("Opponent", "")).strip()
+        side     = str(row.get("Side", "")).strip()
+        if side == "A":
+            away_abbr = team
+            home_abbr = opponent
+        else:
+            away_abbr = opponent
+            home_abbr = team
+        key, away_full, home_full = make_key(away_abbr, home_abbr)
+        if key not in pitchers:
+            pitchers[key] = {}
+        if side == "A":
+            pitchers[key]["bp_away_sp_inn"]  = safe_val(row.get("Innings"))
+            pitchers[key]["bp_away_sp_runs"] = safe_val(row.get("RunsAllowed"))
+            pitchers[key]["bp_away_sp_k"]    = safe_val(row.get("Strikeouts"))
+            pitchers[key]["bp_away_sp_bb"]   = safe_val(row.get("Walks"))
+        else:
+            pitchers[key]["bp_home_sp_inn"]  = safe_val(row.get("Innings"))
+            pitchers[key]["bp_home_sp_runs"] = safe_val(row.get("RunsAllowed"))
+            pitchers[key]["bp_home_sp_k"]    = safe_val(row.get("Strikeouts"))
+            pitchers[key]["bp_home_sp_bb"]   = safe_val(row.get("Walks"))
+    print(f"  BP pitchers ready: {len(pitchers)}")
+    return pitchers
 
-            if side == "A":
-                away_abbr = team
-                home_abbr = opponent
-            else:
-                away_abbr = opponent
-                home_abbr = team
 
-            away_full = ABBR_TO_FULLNAME.get(away_abbr, away_abbr)
-            home_full = ABBR_TO_FULLNAME.get(home_abbr, home_abbr)
-            key = f"{away_full}@{home_full}"
+def load_bp_teams(filepath="ballparkpal_teams.xlsx"):
+    if not os.path.exists(filepath):
+        print("  WARNING: BP teams file not found")
+        return {}
+    df = pd.read_excel(filepath, engine="openpyxl")
+    teams = {}
+    for _, row in df.iterrows():
+        team     = str(row.get("Team", "")).strip()
+        opponent = str(row.get("Opponent", "")).strip()
+        side     = str(row.get("Side", "")).strip()
+        if side == "A":
+            away_abbr = team
+            home_abbr = opponent
+        else:
+            away_abbr = opponent
+            home_abbr = team
+        key, away_full, home_full = make_key(away_abbr, home_abbr)
+        if key not in teams:
+            teams[key] = {}
+        if side == "A":
+            teams[key]["bp_away_rpg"]  = safe_val(row.get("Runs"))
+            teams[key]["bp_away_hrpg"] = safe_val(row.get("HomeRuns"))
+        else:
+            teams[key]["bp_home_rpg"]  = safe_val(row.get("Runs"))
+            teams[key]["bp_home_hrpg"] = safe_val(row.get("HomeRuns"))
+    print(f"  BP teams ready: {len(teams)}")
+    return teams
 
-            if key not in pitchers:
-                pitchers[key] = {}
 
-            if side == "A":
-                pitchers[key]["bp_away_sp_inn"]  = safe_float(row.get("Innings"))
-                pitchers[key]["bp_away_sp_runs"]  = safe_float(row.get("RunsAllowed"))
-                pitchers[key]["bp_away_sp_k"]     = safe_float(row.get("Strikeouts"))
-                pitchers[key]["bp_away_sp_inn"]  = safe_float(row.get("Innings"))
+def get_bp_for_game(bp_dict, away_team, home_team):
+    if not bp_dict:
+        return {}
+    key = f"{away_team}@{home_team}"
+    if key in bp_dict:
+        return bp_dict[key]
+    for k, v in bp_dict.items():
+        parts = k.split("@")
+        if len(parts) == 2:
+            a_match = away_team.lower() in parts[0].lower() or parts[0].lower() in away_team.lower()
+            h_match = home_team.lower() in parts[1].lower() or parts[1].lower() in home_team.lower()
+            if a_match and h_match:
+                return v
+    return {}
