@@ -122,4 +122,4 @@ def load_bp_pitchers(filepath="ballparkpal_pitchers.xlsx") -> dict:
                 pitchers[key]["bp_away_sp_inn"]  = safe_float(row.get("Innings"))
                 pitchers[key]["bp_away_sp_runs"]  = safe_float(row.get("RunsAllowed"))
                 pitchers[key]["bp_away_sp_k"]     = safe_float(row.get("Strikeouts"))
-                pitchers[key]["bp_a
+                pitchers[key]["bp_away_sp_inn"]  = safe_float(row.get("Innings"))
