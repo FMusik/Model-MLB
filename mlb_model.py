@@ -3214,9 +3214,23 @@ def analyze_game(game: dict) -> dict:
         market = sheet_market
         bp     = sheet_bp or {}
     else:
-        print(f"  ⌨️  No sheet data found — using empty market data")
         market = {}
         bp     = {}
+
+    # Load BP data from downloaded XLSX
+    try:
+        from read_ballparkpal import load_bp_games, get_bp_for_game
+        _local_bp = load_bp_games("ballparkpal_games.xlsx")
+        bp_xlsx = get_bp_for_game(_local_bp, info["away_team"], info["home_team"])
+        if bp_xlsx:
+            print(f"  ✅ BP XLSX merged: {info['away_team']} @ {info['home_team']}")
+            for k, v in bp_xlsx.items():
+                if v is not None:
+                    bp[k] = v
+        else:
+            print(f"  ⚠️  No BP match: {info['away_team']} @ {info['home_team']}")
+    except Exception as e:
+        print(f"  ⚠️  BP error: {e}")
 
     # Always try to enrich BP data from downloaded XLSX
     bp_xlsx = get_bp_for_game(_bp_games, info["away_team"], info["home_team"])
