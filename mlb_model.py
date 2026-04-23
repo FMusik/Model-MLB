@@ -21,7 +21,7 @@ import requests
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from read_ballparkpal import load_bp_games, get_bp_for_game
+
 
 # ─────────────────────────────────────────────
 # CONFIG — edit these
