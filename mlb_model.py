@@ -3217,30 +3217,22 @@ def analyze_game(game: dict) -> dict:
         market = {}
         bp     = {}
 
-    # Load BP data from downloaded XLSX
+# Load BP data from all 3 downloaded files
     try:
-        from read_ballparkpal import load_bp_games, get_bp_for_game
-        _local_bp = load_bp_games("ballparkpal_games.xlsx")
-        bp_xlsx = get_bp_for_game(_local_bp, info["away_team"], info["home_team"])
-        if bp_xlsx:
-            print(f"  ✅ BP XLSX merged: {info['away_team']} @ {info['home_team']}")
-            for k, v in bp_xlsx.items():
-                if v is not None:
-                    bp[k] = v
-        else:
-            print(f"  ⚠️  No BP match: {info['away_team']} @ {info['home_team']}")
+        from read_ballparkpal import load_bp_games, load_bp_pitchers, load_bp_teams, get_bp_for_game
+        _bp_g = load_bp_games("ballparkpal_games.xlsx")
+        _bp_p = load_bp_pitchers("ballparkpal_pitchers.xlsx")
+        _bp_t = load_bp_teams("ballparkpal_teams.xlsx")
+
+        for _bp_source in [_bp_g, _bp_p, _bp_t]:
+            bp_xlsx = get_bp_for_game(_bp_source, info["away_team"], info["home_team"])
+            if bp_xlsx:
+                for k, v in bp_xlsx.items():
+                    if v is not None:
+                        bp[k] = v
+        print(f"  ✅ BP XLSX merged: {info['away_team']} @ {info['home_team']}")
     except Exception as e:
         print(f"  ⚠️  BP error: {e}")
-
-    # Always try to enrich BP data from downloaded XLSX
-    bp_xlsx = get_bp_for_game(_bp_games, info["away_team"], info["home_team"])
-    if bp_xlsx:
-        print(f"     ✅ BallparkPal XLSX data found — merging")
-        # XLSX data fills any missing BP fields
-        for k, v in bp_xlsx.items():
-            if v is not None and bp.get(k) is None:
-                bp[k] = v
-
     # Store API-only projection for comparison
     api_only_away  = runs["away_proj_runs"]
     api_only_home  = runs["home_proj_runs"]
