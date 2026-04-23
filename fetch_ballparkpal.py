@@ -44,3 +44,17 @@ for url, filename in [
         print(f"✅ Saved {filename} ({len(r.content):,} bytes)")
     else:
         print(f"⚠️  Failed {filename}: {r.status_code}")
+
+import pandas as pd
+
+print("\n🔍 PITCHERS columns:")
+df_p = pd.read_excel("ballparkpal_pitchers.xlsx", engine="openpyxl")
+print(f"  {list(df_p.columns)}")
+print("  First row sample:")
+print(f"  {df_p.iloc[0].to_dict()}")
+
+print("\n🔍 TEAMS columns:")
+df_t = pd.read_excel("ballparkpal_teams.xlsx", engine="openpyxl")
+print(f"  {list(df_t.columns)}")
+print("  First row sample:")
+print(f"  {df_t.iloc[0].to_dict()}")
