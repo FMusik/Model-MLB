@@ -1490,6 +1490,106 @@ def project_total_runs(away_starter, home_starter, away_offense, home_offense,
 # ─────────────────────────────────────────────
 # WIN PROBABILITY — capped (unchanged)
 # ─────────────────────────────────────────────
+def hr_probability_score(away_pitcher: dict, home_pitcher: dict,
+                          away_offense: dict, home_offense: dict,
+                          park_factor_hr: float, weather_factor: float,
+                          ump_run_factor: float = 1.0,
+                          weather_wind: str = "") -> dict:
+    """
+    HR likelihood score 1-10 for the game.
+    Combines park, pitchers, offense, weather, ump.
+
+    Score:
+      8-10 = 💣 HR VERY LIKELY  → yes on HR props
+      6-7  = ✅ HR LIKELY
+      4-5  = ➡️ NEUTRAL
+      2-3  = 🚫 HR UNLIKELY
+      1    = ❄️ HR VERY UNLIKELY → no on HR props
+    """
+    score = 5.0  # start neutral
+
+    # 1. Park HR factor (biggest weight)
+    if park_factor_hr >= 1.20:    score += 2.0   # Coors, Great American
+    elif park_factor_hr >= 1.10:  score += 1.5   # Yankee Stadium, Globe Life
+    elif park_factor_hr >= 1.05:  score += 1.0
+    elif park_factor_hr >= 1.00:  score += 0.5
+    elif park_factor_hr >= 0.95:  score -= 0.5
+    elif park_factor_hr >= 0.90:  score -= 1.0
+    else:                         score -= 1.5   # Oracle Park, Petco
+
+    # 2. Pitcher HR/9 rates (both pitchers)
+    away_hr9 = away_pitcher.get("hr9", 1.20) or 1.20
+    home_hr9 = home_pitcher.get("hr9", 1.20) or 1.20
+    avg_hr9  = (away_hr9 + home_hr9) / 2
+    if avg_hr9 >= 1.80:   score += 1.5
+    elif avg_hr9 >= 1.50: score += 1.0
+    elif avg_hr9 >= 1.20: score += 0.5
+    elif avg_hr9 >= 0.90: score -= 0.5
+    else:                 score -= 1.0
+
+    # 3. Team HR rates
+    away_hrpg = away_offense.get("hr", 0) / max(away_offense.get("games_2026", 20), 1)
+    home_hrpg = home_offense.get("hr", 0) / max(home_offense.get("games_2026", 20), 1)
+    avg_hrpg  = (away_hrpg + home_hrpg) / 2
+    if avg_hrpg >= 1.5:   score += 1.0
+    elif avg_hrpg >= 1.2: score += 0.5
+    elif avg_hrpg >= 0.8: score += 0.0
+    elif avg_hrpg >= 0.5: score -= 0.5
+    else:                 score -= 1.0
+
+    # 4. Wind direction (out = big boost, in = killer)
+    wind_lower = str(weather_wind).lower()
+    if "out" in wind_lower:
+        try:
+            speed = int(''.join(filter(str.isdigit, wind_lower.split("mph")[0][-3:])))
+            if speed >= 15:   score += 1.5
+            elif speed >= 10: score += 1.0
+            elif speed >= 5:  score += 0.5
+        except:
+            score += 0.5
+    elif "in" in wind_lower:
+        try:
+            speed = int(''.join(filter(str.isdigit, wind_lower.split("mph")[0][-3:])))
+            if speed >= 15:   score -= 1.5
+            elif speed >= 10: score -= 1.0
+            elif speed >= 5:  score -= 0.5
+        except:
+            score -= 0.5
+
+    # 5. Ump zone (tight = fewer HRs via fewer walks/longer counts)
+    if ump_run_factor >= 1.08:   score += 0.5
+    elif ump_run_factor <= 0.93: score -= 0.5
+
+    # Clamp to 1-10
+    score = round(max(1.0, min(10.0, score)), 1)
+
+    # Label
+    if score >= 8:
+        label = "💣 HR VERY LIKELY"
+        lean  = "YES"
+    elif score >= 6:
+        label = "✅ HR LIKELY"
+        lean  = "YES"
+    elif score >= 4:
+        label = "➡️ NEUTRAL"
+        lean  = "NEUTRAL"
+    elif score >= 2:
+        label = "🚫 HR UNLIKELY"
+        lean  = "NO"
+    else:
+        label = "❄️ HR VERY UNLIKELY"
+        lean  = "NO"
+
+    return {
+        "hr_score":      score,
+        "hr_label":      label,
+        "hr_lean":       lean,
+        "hr_park_factor": park_factor_hr,
+        "hr_avg_hr9":    round(avg_hr9, 2),
+        "hr_avg_hrpg":   round(avg_hrpg, 2),
+    }
+
+
 def win_probability(away_runs,home_runs):
     if away_runs+home_runs==0:
         return round(0.5-HOME_FIELD_ADVANTAGE,3),round(0.5+HOME_FIELD_ADVANTAGE,3)
@@ -1833,7 +1933,15 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     away_win_pct,home_win_pct=win_probability(runs["away_proj_runs"],runs["home_proj_runs"])
     yrfi_prob=yrfi_probability(away_pitcher,home_pitcher,away_offense,home_offense,park_factor,ump_rf)
 
-    # Market + BP
+    # ── HR probability score ─────────────────────────────────
+    hr_data = hr_probability_score(
+        away_pitcher, home_pitcher, away_offense, home_offense,
+        park_factor_hr=get_park_factor_hr(info["venue"],_sbp.get("bp_park_hr_pct")),
+        weather_factor=weather_factor,
+        ump_run_factor=ump_rf,
+        weather_wind=info.get("weather_wind","")
+    )
+    print(f"  💣 HR Score: {hr_data['hr_score']}/10 {hr_data['hr_label']} (Park HR:{hr_data['hr_park_factor']:.2f}x | Avg HR/9:{hr_data['hr_avg_hr9']} | Wind:{info.get('weather_wind','')})")
     market=_sm or {}; bp=_sbp.copy() if _sbp else {}
 
     try:
@@ -1982,6 +2090,9 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         "proj_f5_total":round(float(runs.get("proj_f5_total",0) or 0),2),
         "api_proj_total":round(float(runs.get("proj_total",0) or 0),2),
         "away_win_pct":away_win_pct,"home_win_pct":home_win_pct,"yrfi_prob":yrfi_prob,
+        "hr_score":    hr_data["hr_score"],
+        "hr_label":    hr_data["hr_label"],
+        "hr_lean":     hr_data["hr_lean"],
         "park_factor":park_factor,"weather_factor":weather_factor,
         "away_lineup":", ".join(away_lineup) if away_lineup else "Not posted",
         "home_lineup":", ".join(home_lineup) if home_lineup else "Not posted",
@@ -2042,7 +2153,7 @@ HEADERS=[
     "Away BP Rolling (3d)","Home BP Rolling (3d)",
     "Series Context","Travel Factor",
     # ─────────────────
-    "Away Win%","Home Win%","YRFI Prob",
+    "Away Win%","Home Win%","YRFI Prob","HR Lean","HR Score",
     "Away ML","Home ML","Total Line","Over Odds","Under Odds","YRFI Odds","NRFI Odds",
     "Away ML Edge%","Away ML Score","Away ML Signal",
     "Home ML Edge%","Home ML Score","Home ML Signal",
@@ -2095,6 +2206,7 @@ def push_to_sheets(sheet,results):
             r.get("series_label",""),r.get("travel_label",""),
             # Signals
             f"{r.get('away_win_pct',0)*100:.1f}%",f"{r.get('home_win_pct',0)*100:.1f}%",f"{r.get('yrfi_prob',0)*100:.1f}%",
+            r.get("hr_label","N/A"),r.get("hr_score","?"),
             r.get("away_ml",""),r.get("home_ml",""),r.get("total_line",""),r.get("over_odds",""),r.get("under_odds",""),r.get("yrfi_odds",""),r.get("nrfi_odds",""),
             r.get("away_ml_edge",""),r.get("away_ml_score",""),r.get("away_ml_flag",""),
             r.get("home_ml_edge",""),r.get("home_ml_score",""),r.get("home_ml_flag",""),
@@ -2118,7 +2230,8 @@ def push_summary_tab(sheet,results):
     except: pass
     ws=sheet.add_worksheet("⚡ Summary",rows=100,cols=20)
     headers=["Game","Time","Status","Ump","Ump Zone","Series","Proj Score","Total","F5",
-             "Away Win%","Home Win%","YRFI%","Away ML","Home ML","Total Line","Best Bets","Data"]
+             "Away Win%","Home Win%","YRFI%","HR Lean","HR Score",
+             "Away ML","Home ML","Total Line","Best Bets","Data"]
     all_rows=[[f"⚾ MLB MODEL ENHANCED — {today_str()}","NEW: Ump+Rest+Platoon+Rolling BP+Series+Travel"],[],headers]
     for r in results:
         away=r.get("away_team","Away"); home=r.get("home_team","Home")
@@ -2129,6 +2242,7 @@ def push_summary_tab(sheet,results):
             round(float(r.get("proj_total",0) or 0),2),round(float(r.get("proj_f5_total",0) or 0),2),
             f"{r.get('away_win_pct',0)*100:.1f}%",f"{r.get('home_win_pct',0)*100:.1f}%",
             f"{r.get('yrfi_prob',0)*100:.1f}%",
+            r.get("hr_label","N/A"),r.get("hr_score","?"),
             r.get("away_ml",""),r.get("home_ml",""),r.get("total_line",""),
             build_best_bets_str(r),"✅ BP+API" if r.get("bp_blended") else "⚠️ API Only",
         ])
@@ -2195,6 +2309,7 @@ def print_game_summary(r):
 
 ⚾  PROJ: {away} {r.get('away_proj_runs','?')} — {r.get('home_proj_runs','?')} {home} | Total: {r.get('proj_total','?')} | F5: {r.get('proj_f5_total','?')}
 🏆 WIN%: {away} {r.get('away_win_pct',0)*100:.1f}% — {home} {r.get('home_win_pct',0)*100:.1f}% | YRFI: {r.get('yrfi_prob',0)*100:.1f}%
+💣 HR PROP LEAN: {r.get('hr_label','N/A')} ({r.get('hr_score','?')}/10)
    (win prob capped at {MAX_WIN_PROB*100:.0f}%)
 
 💰 BET SIGNALS:
