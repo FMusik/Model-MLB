@@ -32,7 +32,7 @@ SHEET_NAME        = "MLB Daily Model"
 CREDENTIALS_FILE  = "credentials.json"
 EDGE_THRESHOLD    = 5.0
 SEASON            = datetime.date.today().year
-ODDS_API_KEY      = "c81ff126c5a86a502a0dea2fbb7f9b43"
+ODDS_API_KEY      = "49c4128bb4ad9ce02839c921366392bc"
 MAX_WIN_PROB      = 0.65
 MAX_RUN_DIFF      = 2.5
 
