@@ -1676,9 +1676,9 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     else:          edge_score=0
     sharp_score=20 if sharp_confirms else (-20 if sharp_fades else 0)
     total=prob_score+edge_score+sharp_score+ump_adj+lm_adj
-    if total>=80:   signal="🔥🔥 DOUBLE STRONG"
-    elif total>=60: signal="🔥 STRONG"
-    elif total>=40: signal="✅ LEAN"
+    if total>=70:   signal="🔥🔥 DOUBLE STRONG"
+    elif total>=50: signal="🔥 STRONG"
+    elif total>=35: signal="✅ LEAN"
     elif total>=20: signal="👀 WATCH"
     else:           signal="— SKIP"
     return signal,total,edge
@@ -2433,12 +2433,13 @@ def build_best_bets_str(r):
         ("home_tt_over_flag","home_tt_over_odds",f"{r.get('home_team','')} TT OVER"),
     ]:
         flag=str(r.get(fk,""))
-        if "STRONG" in flag:
+        # Show STRONG and LEAN (not WATCH/SKIP/FADE)
+        if "STRONG" in flag or ("LEAN" in flag and "FADE" not in flag):
             odds=r.get(ok,""); ek=fk.replace("_flag","_edge"); edge=r.get(ek,"")
             odds_str=f" {odds:+d}" if isinstance(odds,int) else ""
             edge_str=f" [{edge:+.1f}%]" if isinstance(edge,(int,float)) else ""
             bets.append(f"{flag} {label}{odds_str}{edge_str}")
-    return " | ".join(bets) if bets else "— No strong signals"
+    return " | ".join(bets) if bets else "— No signals"
 
 def print_game_summary(r):
     away=r.get("away_team","Away"); home=r.get("home_team","Home"); sep="="*52
@@ -2452,7 +2453,7 @@ def print_game_summary(r):
         ("yrfi_flag","yrfi_odds","YRFI","yrfi_prob"),("nrfi_flag","nrfi_odds","NRFI","nrfi_prob"),
     ]:
         flag=r.get(fk,"")
-        if flag and "STRONG" in str(flag):
+        if flag and ("STRONG" in str(flag) or ("LEAN" in str(flag) and "FADE" not in str(flag))):
             ek=fk.replace("_flag","_edge"); edge=r.get(ek,""); odds=r.get(ok,""); prob_raw=r.get(pk)
             if pk in ("away_win_pct","home_win_pct","yrfi_prob") and isinstance(prob_raw,float) and prob_raw<=1:
                 prob=round(prob_raw*100,1)
