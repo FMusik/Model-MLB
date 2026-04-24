@@ -32,7 +32,7 @@ SHEET_NAME        = "MLB Daily Model"
 CREDENTIALS_FILE  = "credentials.json"
 EDGE_THRESHOLD    = 5.0
 SEASON            = datetime.date.today().year
-ODDS_API_KEY      = "49c4128bb4ad9ce02839c921366392bc"
+ODDS_API_KEY      = "c81ff126c5a86a502a0dea2fbb7f9b43"
 MAX_WIN_PROB      = 0.65
 MAX_RUN_DIFF      = 2.5
 
@@ -2212,7 +2212,6 @@ def push_tracker_rows(sheet,results):
         "Date","Game","Bet Type","Our Signal","Score (0-100)","Our Prob%",
         "Fair Odds","Market Odds","Edge%","Our Proj Away","Our Proj Home","Our Proj Total",
         "BP Proj Away","BP Proj Home","BP Proj Total","BP YRFI%",
-        "Ump","Ump Run Factor","Away Rest","Home Rest","Series","Travel",
         "Total Diff","Sharp Signal","Actual Away","Actual Home","Actual Total","Hit/Miss","Notes"
     ]
     try: ws=sheet.worksheet(TRACKER_TAB)
@@ -2264,9 +2263,6 @@ def push_tracker_rows(sheet,results):
                 odds if odds else "",
                 f"{edge:+.1f}%" if isinstance(edge,(int,float)) else "",
                 our_away,our_home,our_total,bp_away,bp_home,bp_total,bp_yrfi,
-                r.get("ump_name",""),r.get("ump_run_factor",""),
-                r.get("away_rest_label",""),r.get("home_rest_label",""),
-                r.get("series_label","")[:40],r.get("travel_label",""),
                 total_diff,r.get("sharp_signals","-"),
                 "","","","",""
             ])
