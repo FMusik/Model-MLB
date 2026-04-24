@@ -26,6 +26,9 @@ jobs:
 
       - name: Fetch BallparkPal data
         run: python fetch_ballparkpal.py
+        env:
+          BP_EMAIL: ${{ secrets.BP_EMAIL }}
+          BP_PASSWORD: ${{ secrets.BP_PASSWORD }}
 
       - name: Run MLB model
         run: python mlb_model.py
