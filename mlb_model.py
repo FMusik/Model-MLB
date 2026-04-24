@@ -36,6 +36,11 @@ ODDS_API_KEY      = "c81ff126c5a86a502a0dea2fbb7f9b43"
 MAX_WIN_PROB      = 0.65
 MAX_RUN_DIFF      = 2.5
 
+# OddsPapi — fallback odds + Pinnacle sharp signal
+ODDSPAPI_KEY      = os.environ.get("ODDSPAPI_KEY", "")
+ODDSPAPI_BASE     = "https://api.oddspapi.io/v4"
+MLB_TOURNAMENT_ID = 109  # MLB tournament ID on OddsPapi
+
 UMP_FACTORS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ump_factors.json")
 
 _current_sheet = None
@@ -628,6 +633,123 @@ def get_run_label() -> str:
 
 def get_compare_label(run_label: str) -> str:
     return {"12PM":"6AM","5PM":"12PM"}.get(run_label)
+
+
+# ─────────────────────────────────────────────────────────────
+# ODDSPAPI — Fallback odds + Pinnacle sharp signal
+# MLB tournamentId = 109 | sportId = 13
+# ─────────────────────────────────────────────────────────────
+def _to_american(decimal_odds: float) -> int:
+    try:
+        if decimal_odds >= 2.0: return round((decimal_odds - 1) * 100)
+        else:                   return round(-100 / (decimal_odds - 1))
+    except: return 0
+
+def _american_to_prob_op(odds: int) -> float:
+    if odds > 0: return 100 / (odds + 100)
+    else:        return abs(odds) / (abs(odds) + 100)
+
+def _fuzzy_match_game(op_key: str, all_odds: dict) -> str:
+    op_parts = set(op_key.lower().replace(" @ "," ").split())
+    for key in all_odds:
+        ak_parts = set(key.lower().replace(" @ "," ").split())
+        if len(op_parts & ak_parts) >= 2:
+            return key
+    return None
+
+def _fetch_oddspapi_book(bookmaker: str) -> dict:
+    if not ODDSPAPI_KEY:
+        return {}
+    try:
+        r    = requests.get(f"{ODDSPAPI_BASE}/odds-by-tournaments",
+                            params={"apiKey":ODDSPAPI_KEY,"bookmaker":bookmaker,
+                                    "tournamentIds":MLB_TOURNAMENT_ID}, timeout=15)
+        data = r.json()
+        if not isinstance(data, list): return {}
+        result = {}
+        for event in data:
+            home=event.get("homeTeam",{}).get("name",""); away=event.get("awayTeam",{}).get("name","")
+            if not home or not away: continue
+            key=f"{away} @ {home}"; markets=event.get("odds",{}); od={"away_team":away,"home_team":home}
+            ml=markets.get("1x2") or markets.get("h2h") or markets.get("moneyline") or []
+            for o in (ml if isinstance(ml,list) else [ml]):
+                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd")
+                if not price: continue
+                if "home" in name or home.lower() in name: od["home_ml"]=_to_american(float(price))
+                elif "away" in name or away.lower() in name: od["away_ml"]=_to_american(float(price))
+            tot=markets.get("totals") or markets.get("over_under") or []
+            for o in (tot if isinstance(tot,list) else [tot]):
+                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd"); line=o.get("handicap") or o.get("line")
+                if not price: continue
+                if "over" in name: od["total_line"]=float(line) if line else None; od["over_odds"]=_to_american(float(price))
+                elif "under" in name: od["under_odds"]=_to_american(float(price))
+            rl=markets.get("asian_handicap") or markets.get("run_line") or markets.get("spread") or []
+            for o in (rl if isinstance(rl,list) else [rl]):
+                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd"); line=o.get("handicap") or o.get("line")
+                if not price or not line: continue
+                if "home" in name or home.lower() in name: od["home_rl_odds"]=_to_american(float(price))
+                elif "away" in name or away.lower() in name: od["away_rl_odds"]=_to_american(float(price)); od["away_rl_line"]=float(line)
+            result[key]=od
+        return result
+    except Exception as e:
+        print(f"  ⚠️  OddsPapi ({bookmaker}): {e}"); return {}
+
+def get_oddspapi_fallback(all_odds: dict) -> dict:
+    """
+    Called after get_mlb_odds().
+    1. Pulls Pinnacle → compares to DraftKings → flags sharp money differences
+    2. Fills missing RL/totals from FanDuel/BetMGM as backup
+    """
+    if not ODDSPAPI_KEY:
+        print("  ⚠️  ODDSPAPI_KEY not set — skipping")
+        return all_odds
+
+    print("\n📊 OddsPapi: Pinnacle comparison + gap fill...")
+
+    # Pinnacle sharp signal
+    pin_odds=_fetch_oddspapi_book("pinnacle"); sharp_count=0
+    for op_key,op_data in pin_odds.items():
+        mk=_fuzzy_match_game(op_key,all_odds)
+        if not mk: continue
+        signals=[]
+        ph=op_data.get("home_ml"); dh=all_odds[mk].get("home_ml")
+        if ph and dh:
+            diff=_american_to_prob_op(ph)-_american_to_prob_op(dh)
+            hn=all_odds[mk].get("home_team","Home"); an=all_odds[mk].get("away_team","Away")
+            if diff>=0.04:   signals.append(f"📌 PIN sharp {hn} (Pin:{ph:+d} DK:{dh:+d})")
+            elif diff<=-0.04: signals.append(f"📌 PIN sharp {an} (Pin:{ph:+d} DK:{dh:+d})")
+        pt=op_data.get("total_line"); dt=all_odds[mk].get("total_line")
+        if pt and dt:
+            try:
+                move=float(pt)-float(dt)
+                if abs(move)>=0.5: signals.append(f"📌 PIN total {'▲' if move>0 else '▼'}{move:+.1f} vs DK")
+            except: pass
+        if signals: all_odds[mk]["pinnacle_signal"]=" | ".join(signals); sharp_count+=1
+        if not all_odds[mk].get("away_ml") and op_data.get("away_ml"): all_odds[mk]["away_ml"]=op_data["away_ml"]
+        if not all_odds[mk].get("home_ml") and op_data.get("home_ml"): all_odds[mk]["home_ml"]=op_data["home_ml"]
+
+    print(f"  ✅ Pinnacle: {len(pin_odds)} games | {sharp_count} sharp signals")
+
+    # Fill missing markets
+    missing_rl=sum(1 for v in all_odds.values() if not v.get("away_rl_odds"))
+    missing_tot=sum(1 for v in all_odds.values() if not v.get("total_line"))
+    if missing_rl>0 or missing_tot>0:
+        print(f"  Filling: {missing_rl} RL gaps | {missing_tot} total gaps")
+        for book in ["fanduel","betmgm","draftkings"]:
+            if missing_rl==0 and missing_tot==0: break
+            for op_key,op_data in _fetch_oddspapi_book(book).items():
+                mk=_fuzzy_match_game(op_key,all_odds)
+                if not mk: continue
+                if not all_odds[mk].get("away_rl_odds") and op_data.get("away_rl_odds"):
+                    all_odds[mk]["away_rl_odds"]=op_data["away_rl_odds"]; all_odds[mk]["home_rl_odds"]=op_data.get("home_rl_odds")
+                    all_odds[mk]["away_rl_line"]=op_data.get("away_rl_line",-1.5); missing_rl=max(0,missing_rl-1)
+                if not all_odds[mk].get("total_line") and op_data.get("total_line"):
+                    all_odds[mk]["total_line"]=op_data["total_line"]; all_odds[mk]["over_odds"]=op_data.get("over_odds",-110)
+                    all_odds[mk]["under_odds"]=op_data.get("under_odds",-110); missing_tot=max(0,missing_tot-1)
+
+    print(f"  ✅ OddsPapi fallback complete")
+    return all_odds
+
 
 def push_odds_to_input_tab(sheet, odds: dict) -> None:
     try:
@@ -1844,7 +1966,13 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         sig,score,edge=score_signal(htu,market.get("home_tt_under_odds",-110))
         edges["home_tt_under_edge"]=edge; edges["home_tt_under_score"]=score; edges["home_tt_under_flag"]=sig
 
-    edges["sharp_signals"]=market.get("sharp_signals","—")
+    edges["sharp_signals"] = market.get("sharp_signals","—")
+
+    # Add Pinnacle sharp signal if available
+    pinnacle_sig = current_odds.get(_gn, {}).get("pinnacle_signal", "")
+    if pinnacle_sig:
+        existing = edges["sharp_signals"]
+        edges["sharp_signals"] = f"{pinnacle_sig} | {existing}" if existing != "—" else pinnacle_sig
 
     return {
         **info,
@@ -2190,7 +2318,9 @@ def main():
     load_ump_data()
     create_input_tab(sheet)
     odds=get_mlb_odds()
-    if odds: push_odds_to_input_tab(sheet,odds)
+    if odds:
+        odds=get_oddspapi_fallback(odds)  # Pinnacle sharp signal + fill gaps
+        push_odds_to_input_tab(sheet,odds)
     rl=get_run_label(); cl=get_compare_label(rl); snapshot={}
     print(f"\n📡 Run: {rl}", end=" ")
     if cl:
@@ -2232,6 +2362,7 @@ if __name__=="__main__":
         _current_sheet=get_sheet(SHEET_NAME); sheet=_current_sheet
         load_calibration(sheet); load_ump_data(); create_input_tab(sheet)
         odds=get_mlb_odds()
+        if odds: odds=get_oddspapi_fallback(odds)  # Pinnacle + gap fill
         rl=get_run_label(); cl=get_compare_label(rl); snapshot={}
         if cl: snapshot=load_odds_snapshot_from_sheet(sheet,cl)
         games=get_todays_games()
