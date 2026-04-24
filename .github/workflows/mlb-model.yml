@@ -1,38 +1,32 @@
-name: MLB Betting Model — Daily Run
+name: MLB Model
 
 on:
   schedule:
-    - cron: '0 13 * * *'
-    - cron: '0 16 * * *'
-    - cron: '0 21 * * *'
+    - cron: '0 13 * * *'   # 9am ET
+    - cron: '0 16 * * *'   # 12pm ET
+    - cron: '0 21 * * *'   # 5pm ET
   workflow_dispatch:
 
 jobs:
   run-model:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install MLB-StatsAPI gspread google-auth pandas requests openpyxl
+        run: pip install gspread google-auth requests
 
-      - name: Write credentials file
-        run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
-
-      - name: Fetch BallparkPal data
-        env:
-          BP_EMAIL: ${{ secrets.BP_EMAIL }}
-          BP_PASSWORD: ${{ secrets.BP_PASSWORD }}
-        run: python fetch_ballparkpal.py
+      - name: Write credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
       - name: Run MLB model
         run: python mlb_model.py
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
