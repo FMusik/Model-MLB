@@ -19,10 +19,13 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install gspread google-auth requests pandas openpyxl
+        run: pip install gspread google-auth requests pandas openpyxl selenium
 
       - name: Write credentials
         run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Fetch BallparkPal data
+        run: python fetch_ballparkpal.py
 
       - name: Run MLB model
         run: python mlb_model.py
