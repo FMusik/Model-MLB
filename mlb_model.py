@@ -1676,8 +1676,15 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     edge=calc_edge(our_prob,market_odds)
 
     # ── AUTO-SKIP FILTERS ─────────────────────────────────────
-    # 1. Minimum edge 10%
-    if edge < 10.0:
+    # 1. Minimum edge by bet type
+    min_edge = 7.0  # default
+    if bet_type in ("away_ml","home_ml"):    min_edge = 5.0   # ML: 5%+ edge
+    elif bet_type in ("away_spread","home_spread"): min_edge = 6.0  # RL: 6%+
+    elif bet_type in ("over",):              min_edge = 7.0   # Over: 7%+
+    elif bet_type in ("under",):             min_edge = 15.0  # Under: 15%+ (losing market)
+    elif bet_type in ("nrfi",):              min_edge = 999.0 # NRFI: never signal
+    elif bet_type in ("yrfi",):              min_edge = 10.0  # YRFI: 10%+
+    if edge < min_edge:
         return "— SKIP",0,edge
 
     # 2. Fair odds overconfidence check — skip if fair < -250
@@ -1689,17 +1696,13 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     if market_odds < -200:
         return "— SKIP (heavy fav)",0,edge
 
-    # 4. Fair vs market gap > 100 points — model too far off
-    if abs(fair_odds - market_odds) > 100:
+    # 4. Fair vs market gap > 150 points — model too far off
+    if abs(fair_odds - market_odds) > 150:
         return "— SKIP (gap too large)",0,edge
 
-    # 5. NRFI — skip entirely
+    # 5. NRFI — skip entirely (42.5% win rate)
     if bet_type in ("nrfi",):
         return "— SKIP (NRFI)",0,edge
-
-    # 6. UNDER — skip unless edge >= 20%
-    if bet_type in ("under",) and edge < 20.0:
-        return "— SKIP (UNDER<20%)",0,edge
 
     # ── FADE CHECK ────────────────────────────────────────────
     if edge <= -EDGE_THRESHOLD: return "❌ FADE",round(edge),edge
