@@ -1361,7 +1361,7 @@ def get_weather_factor(temp,wind):
 # ─────────────────────────────────────────────
 # RUN PROJECTIONS — ENHANCED with new factors
 # ─────────────────────────────────────────────
-HOME_FIELD_ADVANTAGE = 0.035
+HOME_FIELD_ADVANTAGE = 0.020  # Reduced from 0.035 — was inflating home win probability
 
 def project_runs_allowed(pitcher, opp_offense, park_factor, weather_factor,
                           lineup_ops=None, recent_offense=None, location_splits=None,
@@ -1656,26 +1656,79 @@ def prob_to_american(prob):
     return round(((1-prob)/prob)*100)
 
 def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
-                 ump_adj=0, lm_adj=0) -> tuple:
+                 ump_adj=0, lm_adj=0, bet_type="", line_value=None) -> tuple:
     """
-    Enhanced scoring: adds ump_adj (ump tendency) and lm_adj (line movement) to total.
-    These can push a LEAN to STRONG or pull a STRONG back to LEAN.
+    Enhanced scoring with data-driven filters applied.
+
+    AUTO-SKIP filters (based on tracker analysis):
+      - Edge < 10% → no signal
+      - Fair odds < -250 → model overconfident, skip
+      - NRFI → skip (42.5% win rate)
+      - UNDER → skip unless edge >= 20%
+      - Heavy ML favorite (market odds < -200) → skip
+      - Fair vs market odds gap > 100pts → model too far off
+
+    BOOSTERS (based on winning patterns):
+      - Run line +1.5 underdog → +10pts
+      - Over on moderate line (7.0-8.5) → +5pts
     """
     if not market_odds: return "—",0,0.0
     edge=calc_edge(our_prob,market_odds)
-    if edge<=-EDGE_THRESHOLD: return "❌ FADE",round(edge),edge
+
+    # ── AUTO-SKIP FILTERS ─────────────────────────────────────
+    # 1. Minimum edge 10%
+    if edge < 10.0:
+        return "— SKIP",0,edge
+
+    # 2. Fair odds overconfidence check — skip if fair < -250
+    fair_odds = prob_to_american(our_prob)
+    if fair_odds < -250:
+        return "— SKIP (overconfident)",0,edge
+
+    # 3. Heavy market favorite — skip if market < -200
+    if market_odds < -200:
+        return "— SKIP (heavy fav)",0,edge
+
+    # 4. Fair vs market gap > 100 points — model too far off
+    if abs(fair_odds - market_odds) > 100:
+        return "— SKIP (gap too large)",0,edge
+
+    # 5. NRFI — skip entirely
+    if bet_type in ("nrfi",):
+        return "— SKIP (NRFI)",0,edge
+
+    # 6. UNDER — skip unless edge >= 20%
+    if bet_type in ("under",) and edge < 20.0:
+        return "— SKIP (UNDER<20%)",0,edge
+
+    # ── FADE CHECK ────────────────────────────────────────────
+    if edge <= -EDGE_THRESHOLD: return "❌ FADE",round(edge),edge
+
+    # ── BASE SCORING ──────────────────────────────────────────
     if our_prob>=0.65:   prob_score=40
     elif our_prob>=0.60: prob_score=30
     elif our_prob>=0.55: prob_score=20
     elif our_prob>=0.50: prob_score=10
     else:                prob_score=0
+
     if edge>=15:   edge_score=40
     elif edge>=10: edge_score=30
     elif edge>=7:  edge_score=20
     elif edge>=5:  edge_score=10
     else:          edge_score=0
+
     sharp_score=20 if sharp_confirms else (-20 if sharp_fades else 0)
-    total=prob_score+edge_score+sharp_score+ump_adj+lm_adj
+
+    # ── BOOSTERS ──────────────────────────────────────────────
+    booster = 0
+    # Run line +1.5 underdog (market odds positive = underdog)
+    if bet_type in ("away_spread","home_spread") and market_odds > 0:
+        booster += 10
+    # Over on moderate total line 7.0-8.5
+    if bet_type in ("over",) and line_value and 7.0 <= float(line_value) <= 8.5:
+        booster += 5
+
+    total=prob_score+edge_score+sharp_score+ump_adj+lm_adj+booster
     if total>=70:   signal="🔥🔥 DOUBLE STRONG"
     elif total>=50: signal="🔥 STRONG"
     elif total>=35: signal="✅ LEAN"
@@ -2027,51 +2080,51 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     game_key=_gn
     current_odds=current_odds or {}; snapshot=snapshot or {}
 
-    def _score(prob, odds, sharp_type, lm_type, ump_type):
+    total_line_val = market.get("total_line")
+
+    def _score(prob, odds, sharp_type, lm_type, ump_type, bet_type="", line_value=None):
         sc,fd=get_sharp_alignment(market,sharp_type)
         ua=get_ump_signal_adjustment(ump_name,ump_type)
         la=get_line_movement_adj(game_key,current_odds,snapshot,lm_type)
-        return score_signal(prob,odds,sc,fd,ua,la)
+        return score_signal(prob,odds,sc,fd,ua,la,bet_type=bet_type,line_value=line_value)
 
     if market.get("away_ml"):
-        sig,score,edge=_score(away_win_pct,market["away_ml"],"away_ml","away_ml","ml")
+        sig,score,edge=_score(away_win_pct,market["away_ml"],"away_ml","away_ml","ml",bet_type="away_ml")
         edges["away_ml_edge"]=edge; edges["away_ml_score"]=score; edges["away_ml_flag"]=sig
     if market.get("home_ml"):
-        sig,score,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml")
+        sig,score,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml",bet_type="home_ml")
         edges["home_ml_edge"]=edge; edges["home_ml_score"]=score; edges["home_ml_flag"]=sig
 
     if market.get("total_line") and market.get("over_odds"):
-        # Use Monte Carlo probability instead of single Poisson
         over_prob  = mc_prob_over(sim, market["total_line"])
         under_prob = mc_prob_under(sim, market["total_line"])
         edges["over_prob"]=round(over_prob*100,1); edges["under_prob"]=round(under_prob*100,1)
         edges["fair_over"]=prob_to_american(over_prob); edges["fair_under"]=prob_to_american(under_prob)
-        sig,score,edge=_score(over_prob,market["over_odds"],"over","over","over")
+        sig,score,edge=_score(over_prob,market["over_odds"],"over","over","over",bet_type="over",line_value=total_line_val)
         edges["over_edge"]=edge; edges["over_score"]=score; edges["over_flag"]=sig
-        sig,score,edge=_score(under_prob,market["under_odds"],"under","under","under")
+        sig,score,edge=_score(under_prob,market["under_odds"],"under","under","under",bet_type="under",line_value=total_line_val)
         edges["under_edge"]=edge; edges["under_score"]=score; edges["under_flag"]=sig
 
     if market.get("mkt_f5_line") and market.get("f5_over_odds"):
         our_f5=runs.get("proj_f5_total") or 0; mkt_f5=float(market["mkt_f5_line"])
         full_total=float(market.get("total_line") or 9.0)
         if mkt_f5/full_total<0.65 and our_f5>0:
-            # F5 simulation — scaled version
             f5_sim = monte_carlo_game(
                 runs.get("proj_f5_away", our_f5*0.48),
                 runs.get("proj_f5_home", our_f5*0.52),
                 n_sims=500)
             f5op=mc_prob_over(f5_sim, mkt_f5); f5up=1-f5op
             edges["f5_over_prob"]=round(f5op*100,1); edges["f5_under_prob"]=round(f5up*100,1)
-            sig,score,edge=_score(f5op,market["f5_over_odds"],"over","over","over")
+            sig,score,edge=_score(f5op,market["f5_over_odds"],"over","over","over",bet_type="over",line_value=mkt_f5)
             edges["f5_over_edge"]=edge; edges["f5_over_score"]=score; edges["f5_over_flag"]=sig
-            sig,score,edge=_score(f5up,market.get("f5_under_odds",-110),"under","under","under")
+            sig,score,edge=_score(f5up,market.get("f5_under_odds",-110),"under","under","under",bet_type="under",line_value=mkt_f5)
             edges["f5_under_edge"]=edge; edges["f5_under_score"]=score; edges["f5_under_flag"]=sig
 
     if market.get("f5_away_ml"):
-        sig,score,edge=_score(away_win_pct,market["f5_away_ml"],"away_ml","away_ml","ml")
+        sig,score,edge=_score(away_win_pct,market["f5_away_ml"],"away_ml","away_ml","ml",bet_type="away_ml")
         edges["f5_away_ml_edge"]=edge; edges["f5_away_ml_score"]=score; edges["f5_away_ml_flag"]=sig
     if market.get("f5_home_ml"):
-        sig,score,edge=_score(home_win_pct,market["f5_home_ml"],"home_ml","home_ml","ml")
+        sig,score,edge=_score(home_win_pct,market["f5_home_ml"],"home_ml","home_ml","ml",bet_type="home_ml")
         edges["f5_home_ml_edge"]=edge; edges["f5_home_ml_score"]=score; edges["f5_home_ml_flag"]=sig
 
     rl_line=abs(float(market.get("away_rl_line",-1.5) or -1.5))
@@ -2079,41 +2132,40 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         arlp,hrlp=run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)
         edges["away_rl_prob"]=round(arlp*100,1); edges["home_rl_prob"]=round(hrlp*100,1)
         edges["fair_away_rl"]=prob_to_american(arlp); edges["fair_home_rl"]=prob_to_american(hrlp)
-        sig,score,edge=_score(arlp,market["away_rl_odds"],"away_spread","away_ml","ml")
+        sig,score,edge=_score(arlp,market["away_rl_odds"],"away_spread","away_ml","ml",bet_type="away_spread")
         edges["away_rl_edge"]=edge; edges["away_rl_score"]=score; edges["away_rl_flag"]=sig
     if market.get("home_rl_odds"):
         hrlp_val=edges.get("home_rl_prob",50)/100 if "home_rl_prob" in edges else run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)[1]
-        sig,score,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml")
+        sig,score,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml",bet_type="home_spread")
         edges["home_rl_edge"]=edge; edges["home_rl_score"]=score; edges["home_rl_flag"]=sig
 
     if market.get("yrfi_odds"):
         ua_yr=get_ump_signal_adjustment(ump_name,"yrfi")
-        la_yr=get_line_movement_adj(game_key,current_odds,snapshot,"over")  # yrfi correlates with over
+        la_yr=get_line_movement_adj(game_key,current_odds,snapshot,"over")
         sc,fd=get_sharp_alignment(market,"over")
-        sig,score,edge=score_signal(yrfi_prob,market["yrfi_odds"],sc,fd,ua_yr,la_yr)
+        sig,score,edge=score_signal(yrfi_prob,market["yrfi_odds"],sc,fd,ua_yr,la_yr,bet_type="yrfi")
         edges["yrfi_edge"]=edge; edges["yrfi_score"]=score; edges["yrfi_flag"]=sig
         ua_nr=-ua_yr; la_nr=-la_yr
         sc,fd=get_sharp_alignment(market,"under")
-        sig,score,edge=score_signal(1-yrfi_prob,market.get("nrfi_odds",-105),sc,fd,ua_nr,la_nr)
+        sig,score,edge=score_signal(1-yrfi_prob,market.get("nrfi_odds",-105),sc,fd,ua_nr,la_nr,bet_type="nrfi")
         edges["nrfi_edge"]=edge; edges["nrfi_score"]=score; edges["nrfi_flag"]=sig
 
     if market.get("away_team_total") and market.get("away_tt_over_odds"):
-        # Use MC team score distribution
         ato=mc_prob_team_total_over(runs["away_proj_runs"],runs["home_proj_runs"],"away",market["away_team_total"],sim)
         atu=1-ato
         edges["away_tt_over_prob"]=round(ato*100,1); edges["fair_away_tt_over"]=prob_to_american(ato)
-        sig,score,edge=score_signal(ato,market["away_tt_over_odds"])
+        sig,score,edge=score_signal(ato,market["away_tt_over_odds"],bet_type="over",line_value=market["away_team_total"])
         edges["away_tt_over_edge"]=edge; edges["away_tt_over_score"]=score; edges["away_tt_over_flag"]=sig
-        sig,score,edge=score_signal(atu,market.get("away_tt_under_odds",-110))
+        sig,score,edge=score_signal(atu,market.get("away_tt_under_odds",-110),bet_type="under",line_value=market["away_team_total"])
         edges["away_tt_under_edge"]=edge; edges["away_tt_under_score"]=score; edges["away_tt_under_flag"]=sig
 
     if market.get("home_team_total") and market.get("home_tt_over_odds"):
         hto=mc_prob_team_total_over(runs["away_proj_runs"],runs["home_proj_runs"],"home",market["home_team_total"],sim)
         htu=1-hto
         edges["home_tt_over_prob"]=round(hto*100,1); edges["fair_home_tt_over"]=prob_to_american(hto)
-        sig,score,edge=score_signal(hto,market["home_tt_over_odds"])
+        sig,score,edge=score_signal(hto,market["home_tt_over_odds"],bet_type="over",line_value=market["home_team_total"])
         edges["home_tt_over_edge"]=edge; edges["home_tt_over_score"]=score; edges["home_tt_over_flag"]=sig
-        sig,score,edge=score_signal(htu,market.get("home_tt_under_odds",-110))
+        sig,score,edge=score_signal(htu,market.get("home_tt_under_odds",-110),bet_type="under",line_value=market["home_team_total"])
         edges["home_tt_under_edge"]=edge; edges["home_tt_under_score"]=score; edges["home_tt_under_flag"]=sig
 
     edges["sharp_signals"] = market.get("sharp_signals","—")
