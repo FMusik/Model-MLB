@@ -677,16 +677,26 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
         result = {}
 
         # Build startTime → game key map from Odds API games we already fetched
+        # OddsPapi uses ET, Odds API uses UTC — offset by 4 hours (EDT)
         time_to_key = {}
         if odds_api_games:
             for key, gdata in odds_api_games.items():
                 gt = gdata.get("game_time","")
                 if gt:
-                    time_to_key[gt[:16]] = key
+                    try:
+                        # Parse UTC time and convert to ET (+4hrs for EDT)
+                        gt_clean = gt.replace("Z","+00:00")
+                        if "+" not in gt_clean and len(gt_clean) >= 16:
+                            gt_clean += "+00:00"
+                        utc_dt = datetime.datetime.fromisoformat(gt_clean)
+                        et_dt  = utc_dt + datetime.timedelta(hours=4)  # UTC → ET
+                        time_to_key[et_dt.strftime("%Y-%m-%dT%H:%M")] = key
+                    except:
+                        time_to_key[gt[:16]] = key  # fallback
             if data:
                 sample_papi = str(data[0].get("startTime",""))[:16]
                 sample_odds = list(time_to_key.keys())[0] if time_to_key else "none"
-                print(f"  🔍 Time match: OddsPapi={sample_papi} | OddsAPI={sample_odds}")
+                print(f"  🔍 Time match: OddsPapi={sample_papi} | OddsAPI(ET)={sample_odds}")
 
         for event in data:
             bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
