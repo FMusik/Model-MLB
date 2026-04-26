@@ -1043,16 +1043,43 @@ def parse_game_info(game):
 
 def check_game_timing(game,info):
     try:
-        game_time=datetime.datetime.fromisoformat(info.get("game_time","").replace("Z","+00:00"))
-        now=datetime.datetime.now(datetime.timezone.utc); diff=(now-game_time).total_seconds()/3600
-        abstract=game.get("status",{}).get("abstractGameState",""); detailed=game.get("status",{}).get("detailedState","")
-        if abstract=="Final" or "Final" in detailed: return "🏁 Final"
-        elif (abstract=="Live" or "In Progress" in detailed) and diff>=0.5: return "⚡ In Progress"
-        elif diff>3: return f"⚠️ Started {diff:.1f}hrs ago"
-        elif diff>0.5: return "⚡ In Progress"
-        elif diff>-1: return "🔔 Starting Soon"
-        else: return f"⏰ {abs(diff):.1f}hrs until first pitch"
-    except: return "⏰ Unknown"
+        game_time_str = info.get("game_time","")
+        if not game_time_str:
+            return "⏰ Unknown"
+
+        # MLB API returns UTC times — ensure timezone aware
+        if game_time_str.endswith("Z"):
+            game_time_str = game_time_str.replace("Z","+00:00")
+        elif "+" not in game_time_str and len(game_time_str) >= 16:
+            game_time_str += "+00:00"  # assume UTC if no tz info
+
+        game_time = datetime.datetime.fromisoformat(game_time_str)
+        now  = datetime.datetime.now(datetime.timezone.utc)
+        diff = (now - game_time).total_seconds() / 3600  # positive = past
+
+        abstract = game.get("status",{}).get("abstractGameState","")
+        detailed = game.get("status",{}).get("detailedState","")
+
+        # Trust official status first
+        if abstract == "Final" or "Final" in detailed:
+            return "🏁 Final"
+        if abstract == "Live" or "In Progress" in detailed:
+            return "⚡ In Progress"
+
+        # Fall back to time math — MLB games average ~3hrs
+        if diff > 3.5:
+            return f"🏁 Likely Final ({diff:.1f}hrs ago)"
+        elif diff > 0.5:
+            return f"⚡ In Progress ({diff:.1f}hrs)"
+        elif diff > -0.5:
+            return "🔔 Starting Soon"
+        else:
+            # Convert to ET for display
+            et_offset = datetime.timedelta(hours=-4)  # EDT
+            game_et   = game_time + et_offset
+            return f"⏰ {game_et.strftime('%-I:%M%p')} ET ({abs(diff):.1f}hrs)"
+    except Exception as e:
+        return "⏰ Unknown"
 
 
 # ─────────────────────────────────────────────
@@ -2343,7 +2370,7 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     print(f"\n🔍 {info['away_team']} @ {info['home_team']}")
 
     game_status=check_game_timing(game,info); info["game_status"]=game_status
-    if any(s in game_status for s in ["In Progress","Final","Started","⚡","🏁","⚠️"]):
+    if any(s in game_status for s in ["In Progress","Final","Started","⚡","🏁","⚠️","Likely Final"]):
         print(f"  ⏭️  SKIPPING — {game_status}")
         return {"game_time":info.get("game_time",""),"away_team":info["away_team"],"home_team":info["home_team"],
                 "venue":info.get("venue",""),"game_status":game_status,"skipped":True}
