@@ -658,36 +658,10 @@ def _fuzzy_match_game(op_key: str, all_odds: dict) -> str:
             return key
     return None
 
-def _fetch_oddspapi_book(bookmaker: str) -> dict:
+def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
     """
-    Fetch MLB odds from OddsPapi.
-    Actual response structure:
-    [
-      {
-        "fixtureId": ...,
-        "participantId": 3652,   ← home team
-        "participantId2": 3646,  ← away team
-        "tournamentId": 109,
-        "bookmakerOdds": {
-          "pinnacle": {
-            "bookmakerMarketId_xxx": {
-              "bookmakerMarketId": "line/3/246/.../1/spreads",
-              "marketActive": true,
-              "outcomes": {
-                "131382": {
-                  "players": {"0": {...}},
-                  "active": true,
-                  "price": 2.22,
-                  "priceAmerican": 122,
-                  "mainLine": true,
-                  ...
-                }
-              }
-            }
-          }
-        }
-      }
-    ]
+    Fetch Pinnacle odds from OddsPapi and match to games by startTime.
+    odds_api_games: dict of {game_key: {game_time, away_team, home_team}}
     """
     if not ODDSPAPI_KEY:
         return {}
@@ -701,48 +675,46 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
             return {}
 
         result = {}
-        if data:
-            first = data[0]
-            bm = first.get("bookmakerOdds",{}).get(bookmaker,{})
-            fp = bm.get("fixturePath","")
-            print(f"  🔍 fixturePath sample: {fp[:80]}")
-            markets_sample = bm.get("markets",{})
-            print(f"  🔍 markets keys sample: {list(markets_sample.keys())[:3]}")
-            if markets_sample:
-                first_mkt = next(iter(markets_sample.values()),{})
-                print(f"  🔍 first market keys: {list(first_mkt.keys())}")
+
+        # Build startTime → game key map from Odds API games we already fetched
+        time_to_key = {}
+        if odds_api_games:
+            for key, gdata in odds_api_games.items():
+                gt = gdata.get("game_time","")
+                if gt:
+                    time_to_key[gt[:16]] = key
+            if data:
+                sample_papi = str(data[0].get("startTime",""))[:16]
+                sample_odds = list(time_to_key.keys())[0] if time_to_key else "none"
+                print(f"  🔍 Time match: OddsPapi={sample_papi} | OddsAPI={sample_odds}")
 
         for event in data:
             bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
+            if not bm_data: continue
             if not bm_data.get("bookmakerIsActive", True): continue
 
-            # Extract team names from fixturePath URL
-            # Format: https://www.pinnacle.com/en/baseball/mlb/boston-red-sox-vs-baltimore-orioles/...
-            fixture_path = bm_data.get("fixturePath","")
-            home = away = ""
-            if "/mlb/" in fixture_path:
-                try:
-                    slug = fixture_path.split("/mlb/")[-1].split("/")[0]
-                    if "-vs-" in slug:
-                        parts = slug.split("-vs-")
-                        away = parts[0].replace("-"," ").title()
-                        home = parts[1].replace("-"," ").title()
-                except: pass
+            # Match by startTime
+            start = str(event.get("startTime","") or event.get("trueStartTime",""))[:16]
+            game_key = time_to_key.get(start,"")
 
-            if not home or not away:
+            if game_key and odds_api_games:
+                gd   = odds_api_games[game_key]
+                away = gd.get("away_team","")
+                home = gd.get("home_team","")
+            else:
+                away = home = ""
+
+            if not away or not home:
                 continue
 
             key = f"{away} @ {home}"
-            od  = {"away_team": away, "home_team": home,
-                   "fixture_id": str(event.get("fixtureId",""))}
+            od  = {"away_team": away, "home_team": home}
 
-            # Markets are inside bm_data["markets"]
+            # Parse markets
             markets = bm_data.get("markets", {})
-
-            for market_key, market in markets.items():
+            for mkey, market in markets.items():
                 if not isinstance(market, dict): continue
                 if not market.get("marketActive", True): continue
-
                 market_id = str(market.get("bookmakerMarketId","")).lower()
                 is_ml     = "/moneyline" in market_id or "moneyline" in market_id
                 is_spread = "/spreads" in market_id or "spread" in market_id
@@ -753,12 +725,11 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
                     if not isinstance(oc, dict): continue
                     if not oc.get("active", True): continue
                     if not oc.get("mainLine", True): continue
-
                     price_am  = oc.get("priceAmerican")
                     price_dec = oc.get("price")
                     if price_am is None and price_dec is None: continue
                     american = int(price_am) if price_am is not None else _to_american(float(price_dec))
-                    oc_name  = str(oc.get("name","") or oc.get("playerName","") or "").lower()
+                    oc_name  = str(oc.get("name","") or "").lower()
 
                     if is_ml:
                         if "home" in oc_name or oc_name in ("1","h"):   od["home_ml"] = american
@@ -775,7 +746,7 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
                         if line_val is None: continue
                         try: line_f = float(line_val)
                         except: continue
-                        if "over" in oc_name:   od["total_line"] = line_f; od["over_odds"]  = american
+                        if "over" in oc_name:    od["total_line"] = line_f; od["over_odds"]  = american
                         elif "under" in oc_name: od["under_odds"] = american
                     elif is_tt:
                         line_val = oc.get("line") or oc.get("limit")
@@ -790,137 +761,8 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
                             if is_home_tt: od["home_tt_under_odds"]=american
                             else: od["away_tt_under_odds"]=american
 
-            result[key] = od
-
-        print(f"  ✅ OddsPapi {bookmaker}: parsed {len(result)} games")
-        return result
-
-        # Build participant ID → team name map from fixture paths
-        # Format: "line/3/246/FIXTURE_ID/..."  — we need names from elsewhere
-        # Try fetching fixtures list to get team names
-        fixture_map = {}  # participant1Id → (away_name, home_name)
-        try:
-            fixtures_r = requests.get(f"{ODDSPAPI_BASE}/fixtures",
-                                      params={"apiKey":ODDSPAPI_KEY,
-                                              "tournamentIds":MLB_TOURNAMENT_ID},
-                                      timeout=15)
-            fixtures = fixtures_r.json()
-            if isinstance(fixtures, list):
-                for fx in fixtures:
-                    p1 = str(fx.get("participant1Id",""))
-                    p2 = str(fx.get("participant2Id",""))
-                    n1 = fx.get("participant1","") or fx.get("team1","") or fx.get("home","") or ""
-                    n2 = fx.get("participant2","") or fx.get("team2","") or fx.get("away","") or ""
-                    fid = str(fx.get("fixtureId",""))
-                    if n1 and n2:
-                        fixture_map[fid] = (n2, n1)  # away, home
-                print(f"  🔍 Fixtures map: {len(fixture_map)} games with names")
-                if fixture_map:
-                    sample = next(iter(fixture_map.items()))
-                    print(f"  🔍 Sample fixture: {sample}")
-        except Exception as fe:
-            print(f"  🔍 Fixtures fetch failed: {fe}")
-
-        for event in data:
-            fid = str(event.get("fixtureId",""))
-            p1id = str(event.get("participant1Id",""))
-            p2id = str(event.get("participant2Id",""))
-
-            # Get team names from fixture map or construct from IDs
-            if fid in fixture_map:
-                away, home = fixture_map[fid]
-            else:
-                # Try fixture path in bookmaker data
-                bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
-                fixture_path = bm_data.get("fixturePath","")
-                # Path format: "https://www.pinnacle.com/en/baseball/mlb/team1-vs-team2/..."
-                if "vs" in fixture_path.lower():
-                    try:
-                        slug = fixture_path.split("/mlb/")[-1].split("/")[0]
-                        parts = slug.split("-vs-")
-                        home = parts[0].replace("-"," ").title()
-                        away = parts[1].replace("-"," ").title() if len(parts)>1 else ""
-                    except:
-                        home = away = ""
-                else:
-                    home = away = ""
-
-            if not home or not away:
-                continue
-
-            key = f"{away} @ {home}"
-            od  = {"away_team": away, "home_team": home, "fixture_id": fid}
-
-            # Navigate bookmakerOdds → bookmaker → markets
-            bm_data = event.get("bookmakerOdds", {}).get(bookmaker, {})
-
-            for market_key, market in bm_data.items():
-                # Skip non-market fields
-                if not isinstance(market, dict): continue
-                if "outcomes" not in market: continue
-
-                market_id = str(market.get("bookmakerMarketId","")).lower()
-                if not market.get("marketActive", True): continue
-
-                is_ml     = "/moneyline" in market_id or "moneyline" in market_id
-                is_spread = "/spreads" in market_id or "spread" in market_id
-                is_total  = "/totals" in market_id and "team" not in market_id
-                is_tt     = "teamtotal" in market_id or "team_total" in market_id
-
-                for oc_id, oc in market.get("outcomes",{}).items():
-                    if not isinstance(oc, dict): continue
-                    if not oc.get("active", True): continue
-                    if not oc.get("mainLine", True): continue
-
-                    price_am  = oc.get("priceAmerican")
-                    price_dec = oc.get("price")
-                    if price_am is None and price_dec is None: continue
-
-                    american = int(price_am) if price_am is not None else _to_american(float(price_dec))
-                    oc_name  = str(oc.get("name","") or oc.get("playerName","") or "").lower()
-
-                    if is_ml:
-                        if "home" in oc_name or oc_name in ("1","h"):
-                            od["home_ml"] = american
-                        elif "away" in oc_name or oc_name in ("2","a"):
-                            od["away_ml"] = american
-
-                    elif is_spread:
-                        line_val = oc.get("line") or oc.get("handicap")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        if "home" in oc_name or oc_name in ("1","h"):
-                            od["home_rl_odds"] = american
-                        elif "away" in oc_name or oc_name in ("2","a"):
-                            od["away_rl_odds"] = american
-                            od["away_rl_line"] = line_f
-
-                    elif is_total:
-                        line_val = oc.get("line") or oc.get("limit")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        if "over" in oc_name or oc_name == "o":
-                            od["total_line"] = line_f
-                            od["over_odds"]  = american
-                        elif "under" in oc_name or oc_name == "u":
-                            od["under_odds"] = american
-
-                    elif is_tt:
-                        line_val = oc.get("line") or oc.get("limit")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        is_home_tt = "home" in market_id
-                        if "over" in oc_name:
-                            if is_home_tt: od["home_team_total"] = line_f; od["home_tt_over_odds"] = american
-                            else: od["away_team_total"] = line_f; od["away_tt_over_odds"] = american
-                        elif "under" in oc_name:
-                            if is_home_tt: od["home_tt_under_odds"] = american
-                            else: od["away_tt_under_odds"] = american
-
-            result[key] = od
+            if od.get("home_ml") or od.get("away_ml") or od.get("over_odds"):
+                result[key] = od
 
         print(f"  ✅ OddsPapi {bookmaker}: parsed {len(result)} games")
         return result
@@ -942,8 +784,8 @@ def get_oddspapi_fallback(all_odds: dict) -> dict:
 
     print("\n📊 OddsPapi: Pinnacle comparison + gap fill...")
 
-    # Pinnacle sharp signal
-    pin_odds=_fetch_oddspapi_book("pinnacle"); sharp_count=0
+    # Pinnacle sharp signal — pass all_odds for startTime matching
+    pin_odds=_fetch_oddspapi_book("pinnacle", odds_api_games=all_odds); sharp_count=0
     for op_key,op_data in pin_odds.items():
         mk=_fuzzy_match_game(op_key,all_odds)
         if not mk: continue
@@ -973,7 +815,7 @@ def get_oddspapi_fallback(all_odds: dict) -> dict:
         print(f"  Filling: {missing_rl} RL gaps | {missing_tot} total gaps")
         for book in ["fanduel","betmgm","draftkings"]:
             if missing_rl==0 and missing_tot==0: break
-            for op_key,op_data in _fetch_oddspapi_book(book).items():
+            for op_key,op_data in _fetch_oddspapi_book(book, odds_api_games=all_odds).items():
                 mk=_fuzzy_match_game(op_key,all_odds)
                 if not mk: continue
                 if not all_odds[mk].get("away_rl_odds") and op_data.get("away_rl_odds"):
