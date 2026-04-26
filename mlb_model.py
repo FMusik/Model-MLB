@@ -701,6 +701,18 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
             return {}
 
         result = {}
+        # Debug: show first event structure
+        if data:
+            first = data[0]
+            print(f"  🔍 OddsPapi event keys: {list(first.keys())[:10]}")
+            bm = first.get("bookmakerOdds",{})
+            print(f"  🔍 Bookmakers available: {list(bm.keys())}")
+            if bookmaker in bm:
+                markets = bm[bookmaker]
+                print(f"  🔍 Market keys sample: {list(markets.keys())[:3]}")
+                first_market = next(iter(markets.values()), {})
+                print(f"  🔍 First market: {list(first_market.keys())}")
+
         for event in data:
             # Get team names from participants
             p1 = str(event.get("participantId",""))
