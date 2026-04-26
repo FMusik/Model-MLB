@@ -744,6 +744,14 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
 
             # Parse markets
             markets = bm_data.get("markets", {})
+            # Debug first matched game
+            if not result and markets:
+                first_mkt = next(iter(markets.values()), {})
+                first_oc  = next(iter(first_mkt.get("outcomes",{}).values()), {})
+                print(f"  🔍 Sample outcome keys: {list(first_oc.keys())}")
+                print(f"  🔍 Sample market_id: {first_mkt.get('bookmakerMarketId','')[:60]}")
+                print(f"  🔍 Sample oc_name: '{first_oc.get('name','') or first_oc.get('playerName','')}'")
+                print(f"  🔍 priceAmerican: {first_oc.get('priceAmerican')} mainLine: {first_oc.get('mainLine')}")
             for mkey, market in markets.items():
                 if not isinstance(market, dict): continue
                 if not market.get("marketActive", True): continue
