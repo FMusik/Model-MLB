@@ -688,7 +688,7 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                         if "+" not in gt_clean and len(gt_clean) >= 16:
                             gt_clean += "+00:00"
                         utc_dt = datetime.datetime.fromisoformat(gt_clean)
-                        et_dt  = utc_dt + datetime.timedelta(hours=4)
+                        et_dt  = utc_dt + datetime.timedelta(hours=2.5)  # measured: OddsPapi offset
                         time_to_key[et_dt.strftime("%Y-%m-%dT%H:%M")] = key
                     except:
                         time_to_key[gt[:16]] = key
