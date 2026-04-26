@@ -1094,6 +1094,222 @@ def get_h2h_record(away_team_id,home_team_id):
     return {"h2h_wins":wins,"h2h_losses":losses,"h2h_games":games,
             "h2h_avg_total":round(weighted_total/total_w,2) if total_w>0 else 0,"h2h_win_pct":round(wins/games,3)}
 
+def get_team_elo(team_id: int) -> float:
+    """
+    Calculate a simple Elo-style rating from season record + run differential.
+    Base Elo = 1500. Adjusted by win% and run diff per game.
+    Returns rating (1300-1700 range typically).
+    """
+    try:
+        data = api_get(f"/teams/{team_id}/stats",
+                       {"stats":"season","group":"hitting","season":SEASON,"sportId":1})
+        splits = data.get("stats",[{}])[0].get("splits",[])
+        if not splits: return 1500.0
+
+        # Get team standings for W/L record
+        standings = api_get("/standings",
+                           {"leagueId":"103,104","season":SEASON,"sportId":1})
+        wins=losses=0
+        for record in standings.get("records",[]):
+            for team in record.get("teamRecords",[]):
+                if team.get("team",{}).get("id") == team_id:
+                    wins   = int(team.get("wins",0))
+                    losses = int(team.get("losses",0))
+                    break
+
+        games = wins + losses
+        if games == 0: return 1500.0
+
+        win_pct = wins / games
+        # Run differential from hitting stats
+        s = splits[0]["stat"]
+        runs_scored = float(s.get("runs",0))
+        # Estimate runs allowed from ERA (we'll use a proxy)
+        runs_per_game = runs_scored / max(games,1)
+        league_avg_rpg = 4.50
+
+        # Elo formula: base + win% component + run diff component
+        win_component   = (win_pct - 0.500) * 400   # +200 for .600 team
+        run_component   = (runs_per_game - league_avg_rpg) * 20
+        elo = round(1500.0 + win_component + run_component, 1)
+        return max(1200.0, min(1800.0, elo))
+    except:
+        return 1500.0
+
+def get_team_l10(team_id: int) -> dict:
+    """
+    Last 10 games record + run differential.
+    Returns wins, losses, run_diff, rpg_scored, rpg_allowed.
+    """
+    try:
+        end   = datetime.date.today()
+        start = end - datetime.timedelta(days=20)  # go back 20 days to find 10 games
+        data  = api_get("/schedule",
+                        {"sportId":1,"teamId":team_id,"startDate":start.strftime("%Y-%m-%d"),
+                         "endDate":end.strftime("%Y-%m-%d"),"gameType":"R"})
+        games = []
+        for db in data.get("dates",[]):
+            for g in db.get("games",[]):
+                if g.get("status",{}).get("abstractGameState") != "Final":
+                    continue
+                teams  = g.get("teams",{})
+                away   = teams.get("away",{})
+                home_t = teams.get("home",{})
+                is_home = home_t.get("team",{}).get("id") == team_id
+                if is_home:
+                    scored  = home_t.get("score",0) or 0
+                    allowed = away.get("score",0) or 0
+                    won     = scored > allowed
+                else:
+                    scored  = away.get("score",0) or 0
+                    allowed = home_t.get("score",0) or 0
+                    won     = scored > allowed
+                games.append({"won":won,"scored":scored,"allowed":allowed})
+
+        # Take last 10
+        games = games[-10:]
+        if not games: return {}
+        wins        = sum(1 for g in games if g["won"])
+        losses      = len(games) - wins
+        run_diff    = sum(g["scored"]-g["allowed"] for g in games)
+        rpg_scored  = round(sum(g["scored"] for g in games)/len(games),2)
+        rpg_allowed = round(sum(g["allowed"] for g in games)/len(games),2)
+        return {
+            "l10_wins":    wins,
+            "l10_losses":  losses,
+            "l10_win_pct": round(wins/len(games),3),
+            "l10_run_diff": run_diff,
+            "l10_rpg":     rpg_scored,
+            "l10_rpg_allowed": rpg_allowed,
+            "l10_games":   len(games),
+        }
+    except:
+        return {}
+
+def get_run_differential_edge(team_id: int) -> dict:
+    """
+    Season run differential per game vs league average.
+    Positive = scoring more than allowing relative to league.
+    """
+    try:
+        # Hitting stats for runs scored
+        h_data = api_get(f"/teams/{team_id}/stats",
+                         {"stats":"season","group":"hitting","season":SEASON,"sportId":1})
+        h_splits = h_data.get("stats",[{}])[0].get("splits",[])
+        # Pitching stats for runs allowed
+        p_data = api_get(f"/teams/{team_id}/stats",
+                         {"stats":"season","group":"pitching","season":SEASON,"sportId":1})
+        p_splits = p_data.get("stats",[{}])[0].get("splits",[])
+
+        if not h_splits or not p_splits: return {}
+
+        hs = h_splits[0]["stat"]
+        ps = p_splits[0]["stat"]
+        games   = max(int(hs.get("gamesPlayed",1)),1)
+        scored  = float(hs.get("runs",0)) / games
+        allowed = float(ps.get("runs",0)) / games
+        diff_pg = round(scored - allowed, 3)
+        league  = 0.0  # league average diff is always 0
+
+        return {
+            "rdiff_scored":  round(scored,2),
+            "rdiff_allowed": round(allowed,2),
+            "rdiff_per_game": diff_pg,
+            "rdiff_edge":    round(diff_pg, 3),  # positive = better team
+        }
+    except:
+        return {}
+
+def get_team_streak(team_id: int) -> dict:
+    """
+    Current win/loss streak and recent momentum.
+    Positive streak = winning streak, negative = losing streak.
+    """
+    try:
+        end   = datetime.date.today()
+        start = end - datetime.timedelta(days=30)
+        data  = api_get("/schedule",
+                        {"sportId":1,"teamId":team_id,"startDate":start.strftime("%Y-%m-%d"),
+                         "endDate":end.strftime("%Y-%m-%d"),"gameType":"R"})
+        results = []
+        for db in sorted(data.get("dates",[]), key=lambda x: x.get("date","")):
+            for g in db.get("games",[]):
+                if g.get("status",{}).get("abstractGameState") != "Final":
+                    continue
+                teams  = g.get("teams",{})
+                away   = teams.get("away",{})
+                home_t = teams.get("home",{})
+                is_home = home_t.get("team",{}).get("id") == team_id
+                if is_home:
+                    won = (home_t.get("score",0) or 0) > (away.get("score",0) or 0)
+                else:
+                    won = (away.get("score",0) or 0) > (home_t.get("score",0) or 0)
+                results.append(won)
+
+        if not results: return {}
+
+        # Calculate current streak
+        streak = 0
+        last   = results[-1]
+        for r in reversed(results):
+            if r == last: streak += 1
+            else: break
+        streak_val = streak if last else -streak  # positive=win, negative=loss
+
+        return {
+            "streak":       streak_val,
+            "streak_label": f"W{streak}" if last else f"L{streak}",
+            "on_win_streak": last and streak >= 3,
+            "on_lose_streak": not last and streak >= 3,
+        }
+    except:
+        return {}
+
+def get_support_score(away_elo, home_elo, away_l10, home_l10,
+                      away_rdiff, home_rdiff, away_streak, home_streak) -> dict:
+    """
+    Composite support score (0-1) combining Elo gap, L10 edge,
+    run differential edge, and streak edge.
+    Positive = away team has edge, negative = home team has edge.
+    """
+    # Elo gap (-300 to +300 → normalize to -1 to +1)
+    elo_gap = (away_elo - home_elo) / 300.0
+
+    # L10 edge
+    away_l10_wp = away_l10.get("l10_win_pct", 0.5)
+    home_l10_wp = home_l10.get("l10_win_pct", 0.5)
+    l10_edge = away_l10_wp - home_l10_wp
+
+    # Run diff edge
+    away_rd = away_rdiff.get("rdiff_per_game", 0)
+    home_rd = home_rdiff.get("rdiff_per_game", 0)
+    rdiff_edge = (away_rd - home_rd) / 5.0  # normalize by 5 runs
+
+    # Streak edge
+    away_str = away_streak.get("streak", 0)
+    home_str = home_streak.get("streak", 0)
+    streak_edge = (away_str - home_str) / 10.0  # normalize by 10
+
+    # Weighted composite
+    support = round(
+        elo_gap    * 0.35 +
+        l10_edge   * 0.30 +
+        rdiff_edge * 0.25 +
+        streak_edge * 0.10,
+        3
+    )
+
+    return {
+        "support_score":  support,      # positive = away favored
+        "elo_gap":        round(away_elo - home_elo, 1),
+        "l10_edge":       round(l10_edge, 3),
+        "rdiff_edge":     round(rdiff_edge, 3),
+        "streak_edge":    round(streak_edge, 3),
+        "support_label":  f"Away +{support:.2f}" if support > 0.05 else
+                          f"Home +{abs(support):.2f}" if support < -0.05 else "Neutral",
+    }
+
+
 def get_batter_vs_pitcher(batter_id,pitcher_id):
     if not batter_id or not pitcher_id: return {}
     try:
@@ -1664,7 +1880,10 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
                  bp_rolling_factor=None, travel_factor=None,
                  h2h_win_pct=None, recent_ops=None,
                  lineup_confirmed=True, reverse_line_move=False,
-                 bp_blended=False, series_game_num=1) -> tuple:
+                 bp_blended=False, series_game_num=1,
+                 # Faroed-style edge inputs
+                 elo_gap=0.0, l10_edge=0.0, rdiff_edge=0.0,
+                 streak_edge=0.0, support_score=0.0) -> tuple:
     """
     Confidence % system (0-100%) replacing old label system.
 
@@ -1693,7 +1912,9 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
         return "— SKIP (NRFI)", 0.0, edge
 
     min_edge = {"away_ml":5.0,"home_ml":5.0,"away_spread":6.0,"home_spread":6.0,
-                "over":7.0,"under":15.0,"yrfi":10.0}.get(bet_type, 7.0)
+                "over":7.0,"under":25.0,"yrfi":10.0}.get(bet_type, 7.0)
+                # UNDER raised to 25% — 44.4% win rate, losing market
+                # Run Line min lowered to 6% — 57.9% win rate, best bet type
     if edge < min_edge:
         return "— SKIP", 0.0, edge
 
@@ -1795,18 +2016,20 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     if not lineup_confirmed:
         conf -= 3.0  # lineups not posted yet
 
-    # 16. BET TYPE BONUSES / PENALTIES
+    # 16. BET TYPE BONUSES / PENALTIES (data-driven from tracker)
     if bet_type in ("away_spread","home_spread") and market_odds > 0:
-        conf += 3.0  # RL underdog — historically good
+        conf += 6.0  # RL underdog — 57.9% win rate, best bet type (was +3)
+    if bet_type in ("away_spread","home_spread") and market_odds < 0:
+        conf += 2.0  # RL favorite — still decent
     if bet_type == "over" and line_value:
         try:
             lv = float(line_value)
             if 7.0 <= lv <= 8.5: conf += 2.0  # sweet spot for overs
         except: pass
     if bet_type == "under":
-        conf -= 3.0  # historically weak market
+        conf -= 5.0  # 44.4% win rate — significantly penalize (was -3)
     if bet_type == "yrfi":
-        conf -= 5.0  # 25% win rate historically
+        conf -= 8.0  # 25% win rate — heavy penalty (was -5)
 
     # 17. SERIES CONTEXT
     if series_game_num == 1:
@@ -1818,6 +2041,29 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     # 18. BP DATA AVAILABLE
     if bp_blended:
         conf += 1.0  # more data = more confidence
+
+    # 18. ELO GAP (normalized: ±300 pts = ±3% conf)
+    if elo_gap != 0:
+        conf += (elo_gap / 300.0) * 3.0
+
+    # 19. L10 EDGE (win% diff: ±0.3 = ±3% conf)
+    if l10_edge != 0:
+        conf += l10_edge * 10.0  # 0.1 edge = +1% conf
+
+    # 20. RUN DIFFERENTIAL EDGE
+    if rdiff_edge != 0:
+        conf += rdiff_edge * 3.0  # normalized already
+
+    # 21. STREAK EDGE
+    if streak_edge != 0:
+        conf += streak_edge * 2.0
+
+    # 22. COMPOSITE SUPPORT SCORE
+    # Strong support in our direction = boost
+    if support_score > 0.15:    conf += 3.0   # away team has clear edge
+    elif support_score > 0.05:  conf += 1.5
+    elif support_score < -0.15: conf -= 3.0   # home team has clear edge
+    elif support_score < -0.05: conf -= 1.5
 
     # ── CAP AND CONVERT ───────────────────────────────────────
     conf = round(max(35.0, min(85.0, conf)), 1)
@@ -2034,6 +2280,38 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     if travel["tz_diff"] >= 2:
         print(f"  ✈️  {travel['travel_label']}")
 
+    # ── NEW FAROED-STYLE EDGE VARIABLES ───────────────────────
+    print("  📊 Fetching Elo + L10 + RunDiff + Streak + Support...")
+
+    # 7. Elo ratings
+    away_elo = get_team_elo(info["away_team_id"])
+    home_elo = get_team_elo(info["home_team_id"])
+    elo_gap  = round(away_elo - home_elo, 1)
+    print(f"  📈 Elo: Away {away_elo:.0f} | Home {home_elo:.0f} | Gap: {elo_gap:+.0f}")
+
+    # 8. Last 10 games
+    away_l10 = get_team_l10(info["away_team_id"])
+    home_l10 = get_team_l10(info["home_team_id"])
+    if away_l10 and home_l10:
+        print(f"  🔟 L10: Away {away_l10.get('l10_wins',0)}-{away_l10.get('l10_losses',0)} | Home {home_l10.get('l10_wins',0)}-{home_l10.get('l10_losses',0)}")
+
+    # 9. Run differential
+    away_rdiff = get_run_differential_edge(info["away_team_id"])
+    home_rdiff = get_run_differential_edge(info["home_team_id"])
+    if away_rdiff and home_rdiff:
+        print(f"  📊 RunDiff/G: Away {away_rdiff.get('rdiff_per_game',0):+.2f} | Home {home_rdiff.get('rdiff_per_game',0):+.2f}")
+
+    # 10. Streaks
+    away_streak = get_team_streak(info["away_team_id"])
+    home_streak = get_team_streak(info["home_team_id"])
+    if away_streak and home_streak:
+        print(f"  🔥 Streak: Away {away_streak.get('streak_label','?')} | Home {home_streak.get('streak_label','?')}")
+
+    # 11. Support score (composite of all 4)
+    support = get_support_score(away_elo, home_elo, away_l10, home_l10,
+                                 away_rdiff, home_rdiff, away_streak, home_streak)
+    print(f"  🎯 Support: {support['support_label']} | Elo gap: {support['elo_gap']:+.0f} | L10: {support['l10_edge']:+.3f} | RDiff: {support['rdiff_edge']:+.3f}")
+
     # Lineups + platoon
     away_lineup_full=get_lineup_with_ids(game,"away")
     home_lineup_full=get_lineup_with_ids(game,"home")
@@ -2208,6 +2486,16 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     bp_blend          = bool(runs.get("bp_blended"))
     mc_wp             = sim.get("away_win_prob")
     mc_sd             = sim.get("total_stdev")
+    # New edge variables
+    away_elo_val      = away_elo
+    home_elo_val      = home_elo
+    away_l10_wp       = away_l10.get("l10_win_pct", 0.5) if away_l10 else 0.5
+    home_l10_wp       = home_l10.get("l10_win_pct", 0.5) if home_l10 else 0.5
+    away_rdiff_pg     = away_rdiff.get("rdiff_per_game", 0) if away_rdiff else 0
+    home_rdiff_pg     = home_rdiff.get("rdiff_per_game", 0) if home_rdiff else 0
+    away_streak_val   = away_streak.get("streak", 0) if away_streak else 0
+    home_streak_val   = home_streak.get("streak", 0) if home_streak else 0
+    support_score_val = support.get("support_score", 0) if support else 0
 
     # Detect reverse line movement
     # Public betting one side but line moves the other = sharp action
@@ -2229,11 +2517,19 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
 
     def _score(prob, odds, sharp_type, lm_type, ump_type, bet_type="", line_value=None,
                pitcher_form=None, platoon_sc=None, rest_f=None, fatigue_f=None,
-               bp_roll_f=None, travel_f=None, mc_prob=None, rec_ops=None):
+               bp_roll_f=None, travel_f=None, mc_prob=None, rec_ops=None,
+               away_side=True):
         sc,fd  = get_sharp_alignment(market, sharp_type)
         ua     = get_ump_signal_adjustment(ump_name, ump_type)
         la     = get_line_movement_adj(game_key, current_odds, snapshot, lm_type)
         rlm    = detect_reverse_line_move(bet_type, snapshot, current_odds, game_key)
+        # Edge direction: positive support_score = away team favored
+        # For away bets use support as-is, for home bets flip it
+        sup = support_score_val if away_side else -support_score_val
+        eg  = elo_gap if away_side else -elo_gap
+        l10 = (away_l10_wp - home_l10_wp) if away_side else (home_l10_wp - away_l10_wp)
+        rd  = (away_rdiff_pg - home_rdiff_pg)/5.0 if away_side else (home_rdiff_pg - away_rdiff_pg)/5.0
+        sk  = (away_streak_val - home_streak_val)/10.0 if away_side else (home_streak_val - away_streak_val)/10.0
         return score_signal(
             prob, odds, sc, fd, ua, la,
             bet_type=bet_type, line_value=line_value,
@@ -2246,16 +2542,20 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
             reverse_line_move=rlm,
             bp_blended=bp_blend,
             series_game_num=series_num,
+            elo_gap=eg, l10_edge=l10,
+            rdiff_edge=rd, streak_edge=sk,
+            support_score=sup,
         )
 
     if market.get("away_ml"):
         sig,conf,edge=_score(away_win_pct,market["away_ml"],"away_ml","away_ml","ml",
                              bet_type="away_ml",
-                             pitcher_form=away_pitcher_form_str,  # away pitcher facing home lineup
+                             pitcher_form=away_pitcher_form_str,
                              platoon_sc=away_platoon_sc,
                              rest_f=away_rest_f, fatigue_f=away_fatigue_f,
                              bp_roll_f=away_bp_roll_f, travel_f=away_travel_f,
-                             mc_prob=sim["away_win_prob"], rec_ops=away_rec_ops)
+                             mc_prob=sim["away_win_prob"], rec_ops=away_rec_ops,
+                             away_side=True)
         edges["away_ml_edge"]=edge; edges["away_ml_score"]=conf; edges["away_ml_flag"]=sig
     if market.get("home_ml"):
         sig,conf,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml",
@@ -2264,7 +2564,8 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              platoon_sc=home_platoon_sc,
                              rest_f=home_rest_f, fatigue_f=home_fatigue_f,
                              bp_roll_f=home_bp_roll_f,
-                             mc_prob=sim["home_win_prob"], rec_ops=home_rec_ops)
+                             mc_prob=sim["home_win_prob"], rec_ops=home_rec_ops,
+                             away_side=False)
         edges["home_ml_edge"]=edge; edges["home_ml_score"]=conf; edges["home_ml_flag"]=sig
 
     if market.get("total_line") and market.get("over_odds"):
@@ -2385,6 +2686,20 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         "mc_p90":        sim["p90_total"],
         "mc_away_win":   round(sim["away_win_prob"]*100,1),
         "mc_home_win":   round(sim["home_win_prob"]*100,1),
+        # New Faroed-style edge variables
+        "away_elo":      away_elo,
+        "home_elo":      home_elo,
+        "elo_gap":       elo_gap,
+        "away_l10":      f"{away_l10.get('l10_wins',0)}-{away_l10.get('l10_losses',0)}" if away_l10 else "N/A",
+        "home_l10":      f"{home_l10.get('l10_wins',0)}-{home_l10.get('l10_losses',0)}" if home_l10 else "N/A",
+        "away_l10_wpct": away_l10.get("l10_win_pct","N/A") if away_l10 else "N/A",
+        "home_l10_wpct": home_l10.get("l10_win_pct","N/A") if home_l10 else "N/A",
+        "away_rdiff":    away_rdiff.get("rdiff_per_game","N/A") if away_rdiff else "N/A",
+        "home_rdiff":    home_rdiff.get("rdiff_per_game","N/A") if home_rdiff else "N/A",
+        "away_streak":   away_streak.get("streak_label","N/A") if away_streak else "N/A",
+        "home_streak":   home_streak.get("streak_label","N/A") if home_streak else "N/A",
+        "support_score": support.get("support_score","N/A") if support else "N/A",
+        "support_label": support.get("support_label","N/A") if support else "N/A",
         "park_factor":park_factor,"weather_factor":weather_factor,
         "away_lineup":", ".join(away_lineup) if away_lineup else "Not posted",
         "home_lineup":", ".join(home_lineup) if home_lineup else "Not posted",
@@ -2566,6 +2881,9 @@ HEADERS=[
     # ─────────────────
     "Away Win%","Home Win%","YRFI Prob","HR Lean","HR Score",
     "MC Avg Total","MC StDev","MC P10","MC P90","MC Away Win%","MC Home Win%",
+    "Away Elo","Home Elo","Elo Gap","Away L10","Home L10",
+    "Away RDiff/G","Home RDiff/G","Away Streak","Home Streak",
+    "Support Score","Support Label",
     "Away ML","Home ML","Total Line","Over Odds","Under Odds","YRFI Odds","NRFI Odds",
     "Away ML Edge%","Away ML Score","Away ML Signal",
     "Home ML Edge%","Home ML Score","Home ML Signal",
@@ -2622,6 +2940,11 @@ def push_to_sheets(sheet,results):
             r.get("mc_avg_total",""),r.get("mc_stdev",""),r.get("mc_p10",""),r.get("mc_p90",""),
             f"{r.get('mc_away_win','')}%" if r.get('mc_away_win') else "",
             f"{r.get('mc_home_win','')}%" if r.get('mc_home_win') else "",
+            r.get("away_elo",""),r.get("home_elo",""),r.get("elo_gap",""),
+            r.get("away_l10",""),r.get("home_l10",""),
+            r.get("away_rdiff",""),r.get("home_rdiff",""),
+            r.get("away_streak",""),r.get("home_streak",""),
+            r.get("support_score",""),r.get("support_label",""),
             r.get("away_ml",""),r.get("home_ml",""),r.get("total_line",""),r.get("over_odds",""),r.get("under_odds",""),r.get("yrfi_odds",""),r.get("nrfi_odds",""),
             r.get("away_ml_edge",""),r.get("away_ml_score",""),r.get("away_ml_flag",""),
             r.get("home_ml_edge",""),r.get("home_ml_score",""),r.get("home_ml_flag",""),
@@ -2646,6 +2969,7 @@ def push_summary_tab(sheet,results):
     ws=sheet.add_worksheet("⚡ Summary",rows=100,cols=20)
     headers=["Game","Time","Status","Ump","Ump Zone","Series","Proj Score","Total","F5",
              "Away Win%","Home Win%","YRFI%","HR Lean","HR Score",
+             "Elo Gap","Away L10","Home L10","Away Streak","Home Streak","Support",
              "Away ML","Home ML","Total Line","Best Bets","Data"]
     all_rows=[[f"⚾ MLB MODEL ENHANCED — {today_str()}","NEW: Ump+Rest+Platoon+Rolling BP+Series+Travel"],[],headers]
     for r in results:
@@ -2658,6 +2982,8 @@ def push_summary_tab(sheet,results):
             f"{r.get('away_win_pct',0)*100:.1f}%",f"{r.get('home_win_pct',0)*100:.1f}%",
             f"{r.get('yrfi_prob',0)*100:.1f}%",
             r.get("hr_label","N/A"),r.get("hr_score","?"),
+            r.get("elo_gap",""),r.get("away_l10",""),r.get("home_l10",""),
+            r.get("away_streak",""),r.get("home_streak",""),r.get("support_label",""),
             r.get("away_ml",""),r.get("home_ml",""),r.get("total_line",""),
             build_best_bets_str(r),"✅ BP+API" if r.get("bp_blended") else "⚠️ API Only",
         ])
@@ -2669,6 +2995,8 @@ def build_best_bets_str(r):
     for fk,ok,label in [
         ("away_ml_flag","away_ml",f"{r.get('away_team','')} ML"),
         ("home_ml_flag","home_ml",f"{r.get('home_team','')} ML"),
+        ("away_rl_flag","away_rl_odds",f"{r.get('away_team','')} RL +1.5"),
+        ("home_rl_flag","home_rl_odds",f"{r.get('home_team','')} RL +1.5"),
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}"),
         ("f5_over_flag","f5_over_odds","F5 OVER"),
@@ -2705,7 +3033,8 @@ def print_game_summary(r):
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}","over_prob"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}","under_prob"),
         ("f5_over_flag","f5_over_odds","F5 OVER","f5_over_prob"),
-        ("yrfi_flag","yrfi_odds","YRFI","yrfi_prob"),("nrfi_flag","nrfi_odds","NRFI","nrfi_prob"),
+        ("yrfi_flag","yrfi_odds","YRFI","yrfi_prob"),
+        # NRFI removed — 42.5% win rate below breakeven
     ]:
         flag=r.get(fk,"")
         if flag and ("STRONG" in str(flag) or ("LEAN" in str(flag) and "FADE" not in str(flag))):
@@ -2745,6 +3074,9 @@ def print_game_summary(r):
 🏆 WIN%: {away} {r.get('away_win_pct',0)*100:.1f}% — {home} {r.get('home_win_pct',0)*100:.1f}% | YRFI: {r.get('yrfi_prob',0)*100:.1f}%
 💣 HR PROP LEAN: {r.get('hr_label','N/A')} ({r.get('hr_score','?')}/10)
 🎲 MC (1000 sims): avg={r.get('mc_avg_total','?')} ± {r.get('mc_stdev','?')} | 10th-90th: {r.get('mc_p10','?')}—{r.get('mc_p90','?')} runs
+📈 Elo: Away {r.get('away_elo','?'):.0f} vs Home {r.get('home_elo','?'):.0f} | Gap: {r.get('elo_gap',0):+.0f} | Support: {r.get('support_label','?')}
+🔟 L10: Away {r.get('away_l10','?')} | Home {r.get('home_l10','?')} | Streaks: Away {r.get('away_streak','?')} | Home {r.get('home_streak','?')}
+📊 RDiff/G: Away {r.get('away_rdiff',0):+.2f} | Home {r.get('home_rdiff',0):+.2f}
    (win prob capped at {MAX_WIN_PROB*100:.0f}%)
 
 💰 BET SIGNALS:
@@ -2799,11 +3131,13 @@ def push_tracker_rows(sheet,results):
         signal_map=[
             ("away_ml_flag","away_ml_edge","away_ml",r.get("away_win_pct",0)*100,f"{away} ML",r.get("fair_away_ml",""),"away_ml_score"),
             ("home_ml_flag","home_ml_edge","home_ml",r.get("home_win_pct",0)*100,f"{home} ML",r.get("fair_home_ml",""),"home_ml_score"),
+            ("away_rl_flag","away_rl_edge","away_rl_odds",r.get("away_rl_prob"),f"{away} RL +1.5",r.get("fair_away_rl",""),"away_rl_score"),
+            ("home_rl_flag","home_rl_edge","home_rl_odds",r.get("home_rl_prob"),f"{home} RL +1.5",r.get("fair_home_rl",""),"home_rl_score"),
             ("over_flag","over_edge","over_odds",r.get("over_prob"),f"OVER {r.get('total_line','')}",r.get("fair_over",""),"over_score"),
             ("under_flag","under_edge","under_odds",r.get("under_prob"),f"UNDER {r.get('total_line','')}",r.get("fair_under",""),"under_score"),
             ("f5_over_flag","f5_over_edge","f5_over_odds",r.get("f5_over_prob"),f"F5 OVER",r.get("fair_f5_over",""),"f5_over_score"),
             ("yrfi_flag","yrfi_edge","yrfi_odds",r.get("yrfi_prob",0)*100,"YRFI",r.get("fair_yrfi",""),"yrfi_score"),
-            ("nrfi_flag","nrfi_edge","nrfi_odds",(1-r.get("yrfi_prob",0))*100,"NRFI",r.get("fair_nrfi",""),"nrfi_score"),
+            # NRFI removed — 42.5% win rate, below breakeven at -110
         ]
         for fk,ek,ok,pv,bet_label,fair,sk in signal_map:
             flag=r.get(fk,"")
