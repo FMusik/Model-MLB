@@ -2747,6 +2747,8 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              fatigue_f=away_fatigue_f, travel_f=away_travel_f,
                              mc_prob=sim["away_rl_prob"])
         edges["away_rl_edge"]=edge; edges["away_rl_score"]=conf; edges["away_rl_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ Away RL: {sig} (prob={arlp*100:.1f}% mkt={market.get('away_rl_odds')} edge={edge:.1f}%)")
+        else: print(f"  ✅ Away RL: {sig} (prob={arlp*100:.1f}% edge={edge:.1f}%)")
     if market.get("home_rl_odds"):
         hrlp_val=edges.get("home_rl_prob",50)/100 if "home_rl_prob" in edges else run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)[1]
         sig,conf,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml",
@@ -2754,6 +2756,8 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              pitcher_form=home_pitcher_form_str,
                              mc_prob=sim["home_rl_prob"])
         edges["home_rl_edge"]=edge; edges["home_rl_score"]=conf; edges["home_rl_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ Home RL: {sig} (prob={hrlp_val*100:.1f}% mkt={market.get('home_rl_odds')} edge={edge:.1f}%)")
+        else: print(f"  ✅ Home RL: {sig} (prob={hrlp_val*100:.1f}% edge={edge:.1f}%)")
 
     if market.get("yrfi_odds"):
         ua_yr=get_ump_signal_adjustment(ump_name,"yrfi")
