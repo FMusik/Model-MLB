@@ -659,6 +659,36 @@ def _fuzzy_match_game(op_key: str, all_odds: dict) -> str:
     return None
 
 def _fetch_oddspapi_book(bookmaker: str) -> dict:
+    """
+    Fetch MLB odds from OddsPapi.
+    Actual response structure:
+    [
+      {
+        "fixtureId": ...,
+        "participantId": 3652,   ← home team
+        "participantId2": 3646,  ← away team
+        "tournamentId": 109,
+        "bookmakerOdds": {
+          "pinnacle": {
+            "bookmakerMarketId_xxx": {
+              "bookmakerMarketId": "line/3/246/.../1/spreads",
+              "marketActive": true,
+              "outcomes": {
+                "131382": {
+                  "players": {"0": {...}},
+                  "active": true,
+                  "price": 2.22,
+                  "priceAmerican": 122,
+                  "mainLine": true,
+                  ...
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+    """
     if not ODDSPAPI_KEY:
         return {}
     try:
@@ -666,34 +696,134 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
                             params={"apiKey":ODDSPAPI_KEY,"bookmaker":bookmaker,
                                     "tournamentIds":MLB_TOURNAMENT_ID}, timeout=15)
         data = r.json()
-        if not isinstance(data, list): return {}
+        if not isinstance(data, list):
+            print(f"  ⚠️  OddsPapi unexpected format: {type(data)}")
+            return {}
+
         result = {}
         for event in data:
-            home=event.get("homeTeam",{}).get("name",""); away=event.get("awayTeam",{}).get("name","")
-            if not home or not away: continue
-            key=f"{away} @ {home}"; markets=event.get("odds",{}); od={"away_team":away,"home_team":home}
-            ml=markets.get("1x2") or markets.get("h2h") or markets.get("moneyline") or []
-            for o in (ml if isinstance(ml,list) else [ml]):
-                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd")
-                if not price: continue
-                if "home" in name or home.lower() in name: od["home_ml"]=_to_american(float(price))
-                elif "away" in name or away.lower() in name: od["away_ml"]=_to_american(float(price))
-            tot=markets.get("totals") or markets.get("over_under") or []
-            for o in (tot if isinstance(tot,list) else [tot]):
-                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd"); line=o.get("handicap") or o.get("line")
-                if not price: continue
-                if "over" in name: od["total_line"]=float(line) if line else None; od["over_odds"]=_to_american(float(price))
-                elif "under" in name: od["under_odds"]=_to_american(float(price))
-            rl=markets.get("asian_handicap") or markets.get("run_line") or markets.get("spread") or []
-            for o in (rl if isinstance(rl,list) else [rl]):
-                name=str(o.get("name","")).lower(); price=o.get("price") or o.get("odd"); line=o.get("handicap") or o.get("line")
-                if not price or not line: continue
-                if "home" in name or home.lower() in name: od["home_rl_odds"]=_to_american(float(price))
-                elif "away" in name or away.lower() in name: od["away_rl_odds"]=_to_american(float(price)); od["away_rl_line"]=float(line)
-            result[key]=od
+            # Get team names from participants
+            p1 = str(event.get("participantId",""))
+            p2 = str(event.get("participantId2",""))
+            # OddsPapi uses participant names differently — try multiple fields
+            home = (event.get("homeTeam") or event.get("participant","") or
+                    event.get("team1","") or "")
+            away = (event.get("awayTeam") or event.get("participant2","") or
+                    event.get("team2","") or "")
+
+            # If names not found directly, skip — we'll match by fixture later
+            if not home or not away:
+                # Try to extract from nested structure
+                participants = event.get("participants", [])
+                if len(participants) >= 2:
+                    home = participants[0].get("name","")
+                    away = participants[1].get("name","")
+            if not home or not away:
+                continue
+
+            key = f"{away} @ {home}"
+            od  = {"away_team": away, "home_team": home, "fixture_id": event.get("fixtureId")}
+
+            # Navigate bookmakerOdds → bookmaker → markets
+            bm_odds = event.get("bookmakerOdds", {})
+            bm_data = bm_odds.get(bookmaker, {})
+            if not bm_data:
+                # Try case-insensitive match
+                for k, v in bm_odds.items():
+                    if k.lower() == bookmaker.lower():
+                        bm_data = v
+                        break
+
+            for market_key, market in bm_data.items():
+                if not isinstance(market, dict): continue
+                market_id  = str(market.get("bookmakerMarketId","")).lower()
+                outcomes   = market.get("outcomes", {})
+                main_line  = market.get("marketActive", True)
+                if not main_line: continue
+
+                # Determine market type from ID string
+                is_ml      = "/moneyline" in market_id or "/1x2" in market_id or "moneyline" in market_id
+                is_spread  = "/spreads" in market_id or "spread" in market_id
+                is_total   = "/totals" in market_id and "team" not in market_id
+                is_tt      = "teamtotal" in market_id or "team_total" in market_id or "/teamtotal" in market_id
+
+                for oc_id, oc in outcomes.items():
+                    if not isinstance(oc, dict): continue
+                    if not oc.get("active", True): continue
+
+                    price_am = oc.get("priceAmerican")
+                    price_dec = oc.get("price")
+                    limit    = oc.get("limit")
+                    main     = oc.get("mainLine", True)
+
+                    if not main: continue
+                    if price_am is None and price_dec is None: continue
+
+                    # Convert to American if needed
+                    if price_am is not None:
+                        american = int(price_am)
+                    else:
+                        american = _to_american(float(price_dec))
+
+                    # Determine side from outcome name/id
+                    oc_name = str(oc.get("name","") or oc.get("playerName","") or "").lower()
+
+                    if is_ml:
+                        if "home" in oc_name or oc_name in ("1","h"):
+                            od["home_ml"] = american
+                        elif "away" in oc_name or oc_name in ("2","a"):
+                            od["away_ml"] = american
+
+                    elif is_spread:
+                        line_val = oc.get("line") or oc.get("handicap") or limit
+                        if line_val is None: continue
+                        try: line_f = float(line_val)
+                        except: continue
+                        if "home" in oc_name or oc_name in ("1","h"):
+                            od["home_rl_odds"] = american
+                        elif "away" in oc_name or oc_name in ("2","a"):
+                            od["away_rl_odds"] = american
+                            od["away_rl_line"] = line_f
+
+                    elif is_total:
+                        line_val = oc.get("line") or oc.get("limit") or limit
+                        if line_val is None: continue
+                        try: line_f = float(line_val)
+                        except: continue
+                        if "over" in oc_name or oc_name == "o":
+                            od["total_line"] = line_f
+                            od["over_odds"]  = american
+                        elif "under" in oc_name or oc_name == "u":
+                            od["under_odds"] = american
+
+                    elif is_tt:
+                        line_val = oc.get("line") or oc.get("limit") or limit
+                        if line_val is None: continue
+                        try: line_f = float(line_val)
+                        except: continue
+                        is_home_tt = "home" in market_id
+                        if "over" in oc_name or oc_name == "o":
+                            if is_home_tt:
+                                od["home_team_total"]   = line_f
+                                od["home_tt_over_odds"] = american
+                            else:
+                                od["away_team_total"]   = line_f
+                                od["away_tt_over_odds"] = american
+                        elif "under" in oc_name or oc_name == "u":
+                            if is_home_tt:
+                                od["home_tt_under_odds"] = american
+                            else:
+                                od["away_tt_under_odds"] = american
+
+            result[key] = od
+
+        print(f"  ✅ OddsPapi {bookmaker}: parsed {len(result)} games")
         return result
+
     except Exception as e:
-        print(f"  ⚠️  OddsPapi ({bookmaker}): {e}"); return {}
+        print(f"  ⚠️  OddsPapi ({bookmaker}): {e}")
+        import traceback; traceback.print_exc()
+        return {}
 
 def get_oddspapi_fallback(all_odds: dict) -> dict:
     """
