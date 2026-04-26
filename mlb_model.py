@@ -3352,7 +3352,8 @@ def push_near_miss_tab(sheet, results: list):
     NEAR_MISS_TAB = "👀 Near Miss"
     NEAR_MISS_HEADERS = [
         "Date","Game","Bet Type","Why Skipped","Edge%","Our Prob%",
-        "Market Odds","Fair Odds","Proj Total","MC Avg","Notes"
+        "Market Odds","Fair Odds","Proj Total","MC Avg",
+        "Actual Away","Actual Home","Actual Total","Hit/Miss","Notes"
     ]
     try:
         try: ws = sheet.worksheet(NEAR_MISS_TAB)
@@ -3438,7 +3439,7 @@ def push_near_miss_tab(sheet, results: list):
                         f"{fair_odds:+d}" if isinstance(fair_odds,int) else "",
                         round(float(r.get("proj_total",0) or 0), 2),
                         r.get("mc_avg_total",""),
-                        ""  # Notes — fill in manually
+                        "","","","",""  # Actual Away, Home, Total, Hit/Miss, Notes
                     ])
 
         if near_miss_rows:
