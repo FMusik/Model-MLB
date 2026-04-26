@@ -754,75 +754,90 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                         player0  = first_oc.get("players",{}).get("0",{})
                         print(f"  🔍 ML market: {mid[:50]}")
                         print(f"  🔍 player0 keys: {list(player0.keys())}")
-                        print(f"  🔍 priceAmerican={player0.get('priceAmerican')} mainLine={player0.get('mainLine')}")
-                        bm_oc = first_oc.get("bookmakerOutcomeId","")
-                        print(f"  🔍 bookmakerOutcomeId: {bm_oc}")
+                        print(f"  🔍 priceAmerican={player0.get('priceAmerican')} mainLine={player0.get('mainLine')} playerName='{player0.get('playerName','')}'")
+                        # Show all outcomes
+                        for oc_k, oc_v in mv.get("outcomes",{}).items():
+                            p = oc_v.get("players",{}).get("0",{})
+                            print(f"  🔍   oc[{oc_k}]: price={p.get('priceAmerican')} name='{p.get('playerName','')}'")
                         break
             for mkey, market in markets.items():
                 if not isinstance(market, dict): continue
                 if not market.get("marketActive", True): continue
                 market_id = str(market.get("bookmakerMarketId","")).lower()
-                # Skip alt lines — only use main lines
                 if market_id.startswith("altline"): continue
                 is_ml     = "/moneyline" in market_id
                 is_spread = "/spreads" in market_id and "team" not in market_id
                 is_total  = "/totals" in market_id and "team" not in market_id
                 is_tt     = "teamtotal" in market_id
 
+                # Collect all active main-line outcomes for this market
+                active_ocs = []
                 for oc_id, oc in market.get("outcomes",{}).items():
                     if not isinstance(oc, dict): continue
-                    # Odds are inside oc["players"]["0"] not directly in oc
                     players = oc.get("players",{})
                     player  = players.get("0") or players.get(0) or {}
                     if not isinstance(player, dict): continue
                     if not player.get("mainLine", True): continue
                     if not player.get("active", True): continue
+                    price_am = player.get("priceAmerican")
+                    if price_am is None: continue
+                    pname = str(player.get("playerName","") or "").strip()
+                    line  = player.get("limit") or player.get("line")
+                    active_ocs.append({
+                        "american": int(price_am),
+                        "name":     pname.lower(),
+                        "line":     line,
+                        "oc_id":    oc_id,
+                    })
 
-                    price_am  = player.get("priceAmerican")
-                    price_dec = player.get("price")
-                    if price_am is None and price_dec is None: continue
-                    american  = int(price_am) if price_am is not None else _to_american(float(price_dec))
-                    # Name is in player, outcome, or bookmakerOutcomeId
-                    oc_name   = str(player.get("name","") or player.get("playerName","") or
-                                    oc.get("name","") or "").lower()
-                    bm_oc_id  = str(oc.get("bookmakerOutcomeId","")).lower()
+                if not active_ocs: continue
 
-                    # Determine home/away from outcome id or name
-                    # bookmakerOutcomeId contains "0.0/home" or "0.0/away"
-                    is_home = "home" in bm_oc_id or "home" in oc_name or bm_oc_id.endswith("/1")
-                    is_away = "away" in bm_oc_id or "away" in oc_name or bm_oc_id.endswith("/2")
-                    is_over  = "over" in bm_oc_id or "over" in oc_name
-                    is_under = "under" in bm_oc_id or "under" in oc_name
+                if is_ml and len(active_ocs) >= 2:
+                    # Sort by odds — more negative = favorite = home usually
+                    # But use playerName if available, else use participant IDs from event
+                    p1id = str(event.get("participant1Id",""))
+                    p2id = str(event.get("participant2Id",""))
+                    for oc in active_ocs:
+                        # Match playerName to known team names
+                        n = oc["name"]
+                        if n and home.lower() in n or (away and n in away.lower()):
+                            od["away_ml"] = oc["american"]
+                        elif n and away.lower() in n or (home and n in home.lower()):
+                            od["home_ml"] = oc["american"]
+                    # Fallback: use oc_id order — first outcome = participant1 (home)
+                    if not od.get("home_ml") and not od.get("away_ml"):
+                        sorted_ocs = sorted(active_ocs, key=lambda x: x["oc_id"])
+                        if len(sorted_ocs) >= 2:
+                            od["home_ml"] = sorted_ocs[0]["american"]
+                            od["away_ml"] = sorted_ocs[1]["american"]
 
-                    if is_ml:
-                        if is_home:   od["home_ml"] = american
-                        elif is_away: od["away_ml"] = american
-                    elif is_spread:
-                        line_val = player.get("line") or player.get("handicap")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        if is_home:   od["home_rl_odds"] = american
-                        elif is_away: od["away_rl_odds"] = american; od["away_rl_line"] = line_f
-                    elif is_total:
-                        line_val = player.get("line") or player.get("limit")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        if is_over:    od["total_line"] = line_f; od["over_odds"]  = american
-                        elif is_under: od["under_odds"] = american
-                    elif is_tt:
-                        line_val = player.get("line") or player.get("limit")
-                        if line_val is None: continue
-                        try: line_f = float(line_val)
-                        except: continue
-                        is_home_tt = "home" in market_id
-                        if is_over:
-                            if is_home_tt: od["home_team_total"]=line_f; od["home_tt_over_odds"]=american
-                            else: od["away_team_total"]=line_f; od["away_tt_over_odds"]=american
-                        elif is_under:
-                            if is_home_tt: od["home_tt_under_odds"]=american
-                            else: od["away_tt_under_odds"]=american
+                elif is_spread and len(active_ocs) >= 2:
+                    sorted_ocs = sorted(active_ocs, key=lambda x: x["oc_id"])
+                    if len(sorted_ocs) >= 2:
+                        line = sorted_ocs[0].get("line") or sorted_ocs[1].get("line")
+                        try: line_f = float(line) if line else -1.5
+                        except: line_f = -1.5
+                        od["home_rl_odds"] = sorted_ocs[0]["american"]
+                        od["away_rl_odds"] = sorted_ocs[1]["american"]
+                        od["away_rl_line"] = abs(line_f)
+
+                elif is_total and len(active_ocs) >= 2:
+                    for oc in active_ocs:
+                        n = oc["name"]; line = oc.get("line")
+                        try: line_f = float(line) if line else None
+                        except: line_f = None
+                        if "over" in n or (not n and oc == active_ocs[0]):
+                            if line_f: od["total_line"] = line_f
+                            od["over_odds"] = oc["american"]
+                        elif "under" in n or (not n and oc == active_ocs[1]):
+                            od["under_odds"] = oc["american"]
+                    # Fallback if names empty
+                    if not od.get("over_odds") and len(active_ocs) >= 2:
+                        line = active_ocs[0].get("line")
+                        try: od["total_line"] = float(line) if line else None
+                        except: pass
+                        od["over_odds"]  = active_ocs[0]["american"]
+                        od["under_odds"] = active_ocs[1]["american"]
 
             if od.get("home_ml") or od.get("away_ml") or od.get("over_odds"):
                 result[key] = od
