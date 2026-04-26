@@ -676,9 +676,9 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
 
         result = {}
 
-        # Build startTime → game key map from Odds API games we already fetched
-        # OddsPapi uses ET, Odds API uses UTC — offset by 4 hours (EDT)
+        # Build startTime → game key map with fuzzy ±5min matching
         time_to_key = {}
+        time_to_dt  = {}
         if odds_api_games:
             for key, gdata in odds_api_games.items():
                 gt = gdata.get("game_time","")
@@ -688,32 +688,46 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                         if "+" not in gt_clean and len(gt_clean) >= 16:
                             gt_clean += "+00:00"
                         utc_dt = datetime.datetime.fromisoformat(gt_clean)
-                        et_dt  = utc_dt + datetime.timedelta(hours=2.5)  # measured: OddsPapi offset
+                        et_dt  = utc_dt + datetime.timedelta(hours=2.5)
                         time_to_key[et_dt.strftime("%Y-%m-%dT%H:%M")] = key
+                        time_to_dt[key] = et_dt.replace(tzinfo=None)
                     except:
                         time_to_key[gt[:16]] = key
-            # Debug: show all times to find offset
+
+        def _fuzzy_time_match(papi_time_str: str) -> str:
+            """Match OddsPapi startTime to Odds API game within ±5 minutes."""
+            try:
+                papi_dt = datetime.datetime.fromisoformat(papi_time_str[:16])
+            except:
+                return ""
+            # Exact match first
+            if papi_time_str[:16] in time_to_key:
+                return time_to_key[papi_time_str[:16]]
+            # Fuzzy match within 5 minutes
+            best_key, best_diff = "", 999
+            for key, dt in time_to_dt.items():
+                diff = abs((papi_dt - dt).total_seconds() / 60)
+                if diff < best_diff and diff <= 5:
+                    best_diff = diff
+                    best_key  = key
+            return best_key
+
+        if data:
             papi_times = sorted(set(str(e.get("startTime",""))[:16] for e in data))
             odds_times = sorted(time_to_key.keys())
-            print(f"  🔍 OddsPapi times: {papi_times[:3]}")
-            print(f"  🔍 OddsAPI(+4h):   {odds_times[:3]}")
-            # Try to find actual offset
-            if papi_times and odds_times:
-                try:
-                    pt = datetime.datetime.fromisoformat(papi_times[0])
-                    ot = datetime.datetime.fromisoformat(odds_times[0])
-                    diff = round((pt - ot).total_seconds()/3600, 1)
-                    print(f"  🔍 Actual offset needed: {diff:+.1f}hrs")
-                except: pass
+            print(f"  🔍 OddsPapi: {papi_times[:3]}")
+            print(f"  🔍 OddsAPI:  {odds_times[:3]}")
+            test = _fuzzy_time_match(papi_times[0]) if papi_times else ""
+            print(f"  🔍 Fuzzy match: {papi_times[0] if papi_times else '?'} → '{test}'")
 
         for event in data:
             bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
             if not bm_data: continue
             if not bm_data.get("bookmakerIsActive", True): continue
 
-            # Match by startTime
-            start = str(event.get("startTime","") or event.get("trueStartTime",""))[:16]
-            game_key = time_to_key.get(start,"")
+            # Fuzzy time match
+            start    = str(event.get("startTime","") or event.get("trueStartTime",""))[:16]
+            game_key = _fuzzy_time_match(start)
 
             if game_key and odds_api_games:
                 gd   = odds_api_games[game_key]
