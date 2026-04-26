@@ -2069,9 +2069,17 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
         return "— SKIP (NRFI)", 0.0, edge
 
     min_edge = {"away_ml":5.0,"home_ml":5.0,"away_spread":6.0,"home_spread":6.0,
-                "over":7.0,"under":25.0,"yrfi":10.0}.get(bet_type, 7.0)
+                "over":7.0,"under":15.0,"yrfi":10.0}.get(bet_type, 7.0)
     if edge < min_edge:
         return f"— SKIP (edge {edge:.1f}%<{min_edge:.0f}%)", 0.0, edge
+
+    # Extra filter for UNDER — require projection to be at least 0.75 runs under the line
+    if bet_type == "under" and line_value:
+        try:
+            lv = float(line_value)
+            if lv - (our_prob * lv * 2) < 0.75:  # rough check
+                pass  # let edge filter handle it
+        except: pass
 
     if fair_odds < -250:
         return f"— SKIP (overconfident fair={fair_odds})", 0.0, edge
@@ -3335,6 +3343,114 @@ def push_tracker_rows(sheet,results):
     if all_rows: ws.append_rows(all_rows,value_input_option="USER_ENTERED"); print(f"  ✅ Added {len(all_rows)} signals")
     else: print("  ✅ Tracker up to date")
 
+def push_near_miss_tab(sheet, results: list):
+    """
+    Logs bets that were close but didn't make the cut.
+    Useful for identifying where thresholds may be too tight.
+    Near miss = edge within 50% of threshold, or conf 45-49%
+    """
+    NEAR_MISS_TAB = "👀 Near Miss"
+    NEAR_MISS_HEADERS = [
+        "Date","Game","Bet Type","Why Skipped","Edge%","Our Prob%",
+        "Market Odds","Fair Odds","Proj Total","MC Avg","Notes"
+    ]
+    try:
+        try: ws = sheet.worksheet(NEAR_MISS_TAB)
+        except: ws = sheet.add_worksheet(NEAR_MISS_TAB, rows=500, cols=15)
+
+        today = today_str()
+        # Clear today's near misses to avoid duplicates
+        try:
+            all_vals = ws.get_all_values()
+            rows_to_keep = [row for row in all_vals
+                           if row and row[0] and row[0] != today and row[0] != "Date"]
+            ws.clear()
+            if rows_to_keep:
+                ws.append_row(NEAR_MISS_HEADERS)
+                ws.append_rows(rows_to_keep, value_input_option="USER_ENTERED")
+            else:
+                ws.append_row(NEAR_MISS_HEADERS)
+        except:
+            ws.clear()
+            ws.append_row(NEAR_MISS_HEADERS)
+
+        near_miss_rows = []
+        thresholds = {"away_ml":5.0,"home_ml":5.0,"away_spread":6.0,
+                      "home_spread":6.0,"over":7.0,"under":15.0,"yrfi":10.0}
+
+        for r in results:
+            if r.get("skipped"): continue
+            away = r.get("away_team","Away")
+            home = r.get("home_team","Home")
+            game = f"{away} @ {home}"
+
+            # Check each bet type for near misses
+            checks = [
+                ("away_ml_flag","away_ml_edge","away_ml","away_ml",
+                 r.get("away_win_pct",0)*100, r.get("fair_away_ml","")),
+                ("home_ml_flag","home_ml_edge","home_ml","home_ml",
+                 r.get("home_win_pct",0)*100, r.get("fair_home_ml","")),
+                ("over_flag","over_edge","over_odds","over",
+                 r.get("over_prob"), r.get("fair_over","")),
+                ("under_flag","under_edge","under_odds","under",
+                 r.get("under_prob"), r.get("fair_under","")),
+                ("away_rl_flag","away_rl_edge","away_rl_odds","away_spread",
+                 r.get("away_rl_prob"), r.get("fair_away_rl","")),
+                ("home_rl_flag","home_rl_edge","home_rl_odds","home_spread",
+                 r.get("home_rl_prob"), r.get("fair_home_rl","")),
+                ("yrfi_flag","yrfi_edge","yrfi_odds","yrfi",
+                 r.get("yrfi_prob",0)*100, r.get("fair_yrfi","")),
+            ]
+
+            for fk, ek, ok, bet_type, prob_val, fair_odds in checks:
+                flag = str(r.get(fk,""))
+                if not flag or "SKIP" not in flag: continue
+
+                edge = r.get(ek, 0) or 0
+                odds = r.get(ok,"")
+                threshold = thresholds.get(bet_type, 7.0)
+
+                # Near miss criteria:
+                # 1. Edge within 50% of threshold (e.g. threshold=5%, edge>=2.5%)
+                # 2. Edge is positive (we like the bet, just not enough)
+                # 3. Not a heavy favorite skip or overconfident skip
+                is_near_miss = (
+                    isinstance(edge, (int, float)) and
+                    edge > 0 and
+                    edge >= threshold * 0.5 and
+                    "heavy fav" not in flag and
+                    "overconfident" not in flag and
+                    "gap too large" not in flag and
+                    "NRFI" not in flag
+                )
+
+                if is_near_miss:
+                    # Extract why skipped from flag string
+                    why = flag.replace("— SKIP","").replace("(","").replace(")","").strip()
+                    if not why: why = f"edge {edge:.1f}% < {threshold:.0f}% threshold"
+
+                    near_miss_rows.append([
+                        today, game, bet_type.replace("_"," ").title(),
+                        why,
+                        f"{edge:+.1f}%" if isinstance(edge,(int,float)) else "",
+                        f"{prob_val:.1f}%" if prob_val is not None else "",
+                        odds if odds else "",
+                        f"{fair_odds:+d}" if isinstance(fair_odds,int) else "",
+                        round(float(r.get("proj_total",0) or 0), 2),
+                        r.get("mc_avg_total",""),
+                        ""  # Notes — fill in manually
+                    ])
+
+        if near_miss_rows:
+            ws.append_rows(near_miss_rows, value_input_option="USER_ENTERED")
+            print(f"  👀 Near Miss tab: {len(near_miss_rows)} close calls logged")
+        else:
+            print(f"  👀 Near Miss tab: no near misses today")
+
+    except Exception as e:
+        print(f"  ⚠️  Near Miss tab error: {e}")
+
+
 def check_tracker_readiness(sheet):
     try:
         ws=sheet.worksheet("📊 Tracker"); rows=ws.get_all_values()
@@ -3408,7 +3524,8 @@ def main():
     if skipped: print(f"\n⏭️  Skipped {len(skipped)} games")
     if results:
         push_to_sheets(sheet,results); push_summary_tab(sheet,results)
-        push_tracker_rows(sheet,results); print_tracker_reminder()
+        push_tracker_rows(sheet,results); push_near_miss_tab(sheet,results)
+        print_tracker_reminder()
     print("\n🏁 Done!")
 
 
@@ -3439,7 +3556,8 @@ if __name__=="__main__":
                     if not r.get("skipped"): results.append(r); print_game_summary(r)
                 except Exception as e: print(f"  ❌ {e}")
             if results:
-                push_to_sheets(sheet,results); push_summary_tab(sheet,results); push_tracker_rows(sheet,results)
+                push_to_sheets(sheet,results); push_summary_tab(sheet,results)
+                push_tracker_rows(sheet,results); push_near_miss_tab(sheet,results)
         print("\n🏁 Done!")
     else:
         main()
