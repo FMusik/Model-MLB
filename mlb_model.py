@@ -1656,88 +1656,191 @@ def prob_to_american(prob):
     return round(((1-prob)/prob)*100)
 
 def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
-                 ump_adj=0, lm_adj=0, bet_type="", line_value=None) -> tuple:
+                 ump_adj=0, lm_adj=0, bet_type="", line_value=None,
+                 # New inputs for confidence system
+                 mc_win_prob=None, mc_stdev=None,
+                 pitcher_form=None, platoon_score=None,
+                 rest_factor=None, fatigue_factor=None,
+                 bp_rolling_factor=None, travel_factor=None,
+                 h2h_win_pct=None, recent_ops=None,
+                 lineup_confirmed=True, reverse_line_move=False,
+                 bp_blended=False, series_game_num=1) -> tuple:
     """
-    Enhanced scoring with data-driven filters applied.
+    Confidence % system (0-100%) replacing old label system.
 
-    AUTO-SKIP filters (based on tracker analysis):
-      - Edge < 10% → no signal
-      - Fair odds < -250 → model overconfident, skip
-      - NRFI → skip (42.5% win rate)
-      - UNDER → skip unless edge >= 20%
-      - Heavy ML favorite (market odds < -200) → skip
-      - Fair vs market odds gap > 100pts → model too far off
+    Conf%   Units   Meaning
+    70%+    1.00U   High confidence
+    60-69%  0.75U   Good confidence
+    55-59%  0.50U   Moderate confidence
+    50-54%  0.25U   Low confidence
+    <50%    SKIP    No bet
 
-    BOOSTERS (based on winning patterns):
-      - Run line +1.5 underdog → +10pts
-      - Over on moderate line (7.0-8.5) → +5pts
+    AUTO-SKIP filters (hard rules — never signal):
+      NRFI              → always skip (25% win rate)
+      Edge < min        → skip by bet type
+      Fair odds < -250  → model overconfident
+      Market < -200     → heavy favorite
+      Fair vs mkt > 150 → model too far off
     """
-    if not market_odds: return "—",0,0.0
-    edge=calc_edge(our_prob,market_odds)
+    if not market_odds:
+        return "—", 0.0, 0.0
 
-    # ── AUTO-SKIP FILTERS ─────────────────────────────────────
-    # 1. Minimum edge by bet type
-    min_edge = 7.0  # default
-    if bet_type in ("away_ml","home_ml"):    min_edge = 5.0   # ML: 5%+ edge
-    elif bet_type in ("away_spread","home_spread"): min_edge = 6.0  # RL: 6%+
-    elif bet_type in ("over",):              min_edge = 7.0   # Over: 7%+
-    elif bet_type in ("under",):             min_edge = 15.0  # Under: 15%+ (losing market)
-    elif bet_type in ("nrfi",):              min_edge = 999.0 # NRFI: never signal
-    elif bet_type in ("yrfi",):              min_edge = 10.0  # YRFI: 10%+
-    if edge < min_edge:
-        return "— SKIP",0,edge
-
-    # 2. Fair odds overconfidence check — skip if fair < -250
+    edge     = calc_edge(our_prob, market_odds)
     fair_odds = prob_to_american(our_prob)
+
+    # ── HARD SKIP FILTERS ─────────────────────────────────────
+    if bet_type == "nrfi":
+        return "— SKIP (NRFI)", 0.0, edge
+
+    min_edge = {"away_ml":5.0,"home_ml":5.0,"away_spread":6.0,"home_spread":6.0,
+                "over":7.0,"under":15.0,"yrfi":10.0}.get(bet_type, 7.0)
+    if edge < min_edge:
+        return "— SKIP", 0.0, edge
+
     if fair_odds < -250:
-        return "— SKIP (overconfident)",0,edge
+        return "— SKIP (overconfident)", 0.0, edge
 
-    # 3. Heavy market favorite — skip if market < -200
     if market_odds < -200:
-        return "— SKIP (heavy fav)",0,edge
+        return "— SKIP (heavy fav)", 0.0, edge
 
-    # 4. Fair vs market gap > 150 points — model too far off
     if abs(fair_odds - market_odds) > 150:
-        return "— SKIP (gap too large)",0,edge
+        return "— SKIP (gap too large)", 0.0, edge
 
-    # 5. NRFI — skip entirely (42.5% win rate)
-    if bet_type in ("nrfi",):
-        return "— SKIP (NRFI)",0,edge
+    if edge <= -EDGE_THRESHOLD:
+        return "❌ FADE", 0.0, edge
 
-    # ── FADE CHECK ────────────────────────────────────────────
-    if edge <= -EDGE_THRESHOLD: return "❌ FADE",round(edge),edge
+    # ── CONFIDENCE % CALCULATION ──────────────────────────────
+    # Start from base win probability (as %)
+    conf = our_prob * 100  # e.g. 58.0%
 
-    # ── BASE SCORING ──────────────────────────────────────────
-    if our_prob>=0.65:   prob_score=40
-    elif our_prob>=0.60: prob_score=30
-    elif our_prob>=0.55: prob_score=20
-    elif our_prob>=0.50: prob_score=10
-    else:                prob_score=0
+    # 1. EDGE BONUS — each 1% edge = +0.8% confidence
+    conf += edge * 0.8
 
-    if edge>=15:   edge_score=40
-    elif edge>=10: edge_score=30
-    elif edge>=7:  edge_score=20
-    elif edge>=5:  edge_score=10
-    else:          edge_score=0
+    # 2. MONTE CARLO AGREEMENT
+    if mc_win_prob is not None:
+        mc_diff = (mc_win_prob - our_prob) * 100
+        if mc_diff >= 3:    conf += 2.0   # MC more bullish = good
+        elif mc_diff <= -3: conf -= 2.0   # MC more bearish = bad
+    # MC variance penalty
+    if mc_stdev is not None:
+        if mc_stdev > 4.0:   conf -= 3.0  # very high variance
+        elif mc_stdev > 3.5: conf -= 1.5  # high variance
+        elif mc_stdev < 2.5: conf += 1.5  # low variance = more predictable
 
-    sharp_score=20 if sharp_confirms else (-20 if sharp_fades else 0)
+    # 3. SHARP MONEY
+    if sharp_confirms:   conf += 5.0
+    elif sharp_fades:    conf -= 5.0
 
-    # ── BOOSTERS ──────────────────────────────────────────────
-    booster = 0
-    # Run line +1.5 underdog (market odds positive = underdog)
+    # 4. REVERSE LINE MOVE (strongest sharp signal)
+    if reverse_line_move: conf += 5.0
+
+    # 5. UMP TENDENCY
+    if ump_adj > 0:   conf += 2.0
+    elif ump_adj < 0: conf -= 2.0
+
+    # 6. LINE MOVEMENT
+    if lm_adj > 0:   conf += 3.0
+    elif lm_adj < 0: conf -= 3.0
+
+    # 7. PITCHER FORM
+    if pitcher_form:
+        form = str(pitcher_form).upper()
+        if "HOT" in form:         conf += 3.0
+        elif "SOLID" in form:     conf += 1.5
+        elif "COLD" in form:      conf -= 2.0
+        elif "STRUGGLING" in form: conf -= 3.0
+
+    # 8. PLATOON ADVANTAGE
+    if platoon_score is not None:
+        if platoon_score >= 0.5:    conf += 2.0
+        elif platoon_score >= 0.2:  conf += 1.0
+        elif platoon_score <= -0.5: conf -= 2.0
+        elif platoon_score <= -0.2: conf -= 1.0
+
+    # 9. PITCHER REST
+    if rest_factor is not None:
+        if rest_factor < 0.95:   conf -= 2.0  # short rest / rust
+        elif rest_factor > 1.0:  conf += 1.0  # extra rest
+
+    # 10. TEAM FATIGUE
+    if fatigue_factor is not None:
+        if fatigue_factor < 0.95:   conf -= 2.0  # B2B + road trip
+        elif fatigue_factor < 0.98: conf -= 1.0
+
+    # 11. BULLPEN ROLLING WORKLOAD
+    if bp_rolling_factor is not None:
+        if bp_rolling_factor < 0.93:  conf -= 2.0  # heavily used
+        elif bp_rolling_factor > 1.0: conf += 1.5  # well rested
+
+    # 12. TRAVEL / TIMEZONE
+    if travel_factor is not None:
+        if travel_factor < 0.95:   conf -= 2.0
+        elif travel_factor < 0.98: conf -= 1.0
+
+    # 13. H2H HISTORY
+    if h2h_win_pct is not None and h2h_win_pct > 0:
+        if h2h_win_pct >= 0.60:   conf += 2.0
+        elif h2h_win_pct >= 0.55: conf += 1.0
+        elif h2h_win_pct <= 0.40: conf -= 2.0
+        elif h2h_win_pct <= 0.45: conf -= 1.0
+
+    # 14. RECENT OFFENSIVE FORM
+    if recent_ops is not None:
+        if recent_ops >= 0.780:   conf += 2.0
+        elif recent_ops >= 0.750: conf += 1.0
+        elif recent_ops <= 0.680: conf -= 2.0
+        elif recent_ops <= 0.710: conf -= 1.0
+
+    # 15. LINEUP CONFIRMED
+    if not lineup_confirmed:
+        conf -= 3.0  # lineups not posted yet
+
+    # 16. BET TYPE BONUSES / PENALTIES
     if bet_type in ("away_spread","home_spread") and market_odds > 0:
-        booster += 10
-    # Over on moderate total line 7.0-8.5
-    if bet_type in ("over",) and line_value and 7.0 <= float(line_value) <= 8.5:
-        booster += 5
+        conf += 3.0  # RL underdog — historically good
+    if bet_type == "over" and line_value:
+        try:
+            lv = float(line_value)
+            if 7.0 <= lv <= 8.5: conf += 2.0  # sweet spot for overs
+        except: pass
+    if bet_type == "under":
+        conf -= 3.0  # historically weak market
+    if bet_type == "yrfi":
+        conf -= 5.0  # 25% win rate historically
 
-    total=prob_score+edge_score+sharp_score+ump_adj+lm_adj+booster
-    if total>=70:   signal="🔥🔥 DOUBLE STRONG"
-    elif total>=50: signal="🔥 STRONG"
-    elif total>=35: signal="✅ LEAN"
-    elif total>=20: signal="👀 WATCH"
-    else:           signal="— SKIP"
-    return signal,total,edge
+    # 17. SERIES CONTEXT
+    if series_game_num == 1:
+        if bet_type == "under": conf += 1.0   # fresh arms → under
+        elif bet_type == "over": conf -= 1.0
+    elif series_game_num >= 3:
+        if bet_type == "over": conf += 1.0    # tired arms → over
+
+    # 18. BP DATA AVAILABLE
+    if bp_blended:
+        conf += 1.0  # more data = more confidence
+
+    # ── CAP AND CONVERT ───────────────────────────────────────
+    conf = round(max(35.0, min(85.0, conf)), 1)
+
+    # ── UNIT SIZING ───────────────────────────────────────────
+    if conf >= 70:    units = 1.00
+    elif conf >= 60:  units = 0.75
+    elif conf >= 55:  units = 0.50
+    elif conf >= 50:  units = 0.25
+    else:             units = 0.0  # SKIP
+
+    # YRFI always sprinkle regardless of conf
+    if bet_type == "yrfi" and units > 0:
+        units = 0.10
+
+    if units == 0:
+        return f"— SKIP ({conf:.0f}%)", conf, edge
+
+    # ── SIGNAL LABEL ──────────────────────────────────────────
+    stars = "⭐" * min(int(conf/10), 8)
+    signal = f"{stars} {conf:.0f}% → {units}U"
+
+    return signal, conf, edge
 
 def get_sharp_alignment(market,bet_type):
     if bet_type=="away_ml":       b,m=market.get("ml_bet_away"),market.get("ml_money_away")
@@ -2085,91 +2188,177 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
 
     total_line_val = market.get("total_line")
 
-    def _score(prob, odds, sharp_type, lm_type, ump_type, bet_type="", line_value=None):
-        sc,fd=get_sharp_alignment(market,sharp_type)
-        ua=get_ump_signal_adjustment(ump_name,ump_type)
-        la=get_line_movement_adj(game_key,current_odds,snapshot,lm_type)
-        return score_signal(prob,odds,sc,fd,ua,la,bet_type=bet_type,line_value=line_value)
+    # Pre-calculate inputs for confidence system
+    lineup_confirmed  = bool(away_lineup_full or home_lineup_full)
+    away_pitcher_form_str = away_pf.get("recent_form_score","")
+    home_pitcher_form_str = home_pf.get("recent_form_score","")
+    away_platoon_sc   = away_platoon.get("platoon_score", 0)
+    home_platoon_sc   = home_platoon.get("platoon_score", 0)
+    away_rest_f       = away_rest.get("rest_factor", 1.0)
+    home_rest_f       = home_rest.get("rest_factor", 1.0)
+    away_fatigue_f    = combined_away_fatigue
+    home_fatigue_f    = home_schedule.get("fatigue_factor", 1.0)
+    away_bp_roll_f    = away_bp_roll.get("bp_avail_factor", 1.0)
+    home_bp_roll_f    = home_bp_roll.get("bp_avail_factor", 1.0)
+    away_travel_f     = travel.get("travel_factor", 1.0)
+    h2h_wp            = h2h.get("h2h_win_pct") if h2h else None
+    away_rec_ops      = away_recent.get("recent_ops")
+    home_rec_ops      = home_recent.get("recent_ops")
+    series_num        = series.get("series_game_num", 1)
+    bp_blend          = bool(runs.get("bp_blended"))
+    mc_wp             = sim.get("away_win_prob")
+    mc_sd             = sim.get("total_stdev")
+
+    # Detect reverse line movement
+    # Public betting one side but line moves the other = sharp action
+    def detect_reverse_line_move(bet_type, snap, curr, game_k):
+        try:
+            if not snap or not curr: return False
+            sg = snap.get(game_k, {}); cg = curr.get(game_k, {})
+            if not sg or not cg: return False
+            if bet_type in ("away_ml","home_ml"):
+                pub_pct = market.get("ml_bet_away" if "away" in bet_type else "ml_bet_home")
+                c_ml = cg.get("away_ml" if "away" in bet_type else "home_ml")
+                s_ml = sg.get("away_ml" if "away" in bet_type else "home_ml")
+                if pub_pct and c_ml and s_ml:
+                    line_moved_shorter = int(c_ml) < int(s_ml)  # odds shortened = more likely
+                    public_on_other    = float(pub_pct) < 40     # public mostly on other side
+                    return line_moved_shorter and public_on_other
+        except: pass
+        return False
+
+    def _score(prob, odds, sharp_type, lm_type, ump_type, bet_type="", line_value=None,
+               pitcher_form=None, platoon_sc=None, rest_f=None, fatigue_f=None,
+               bp_roll_f=None, travel_f=None, mc_prob=None, rec_ops=None):
+        sc,fd  = get_sharp_alignment(market, sharp_type)
+        ua     = get_ump_signal_adjustment(ump_name, ump_type)
+        la     = get_line_movement_adj(game_key, current_odds, snapshot, lm_type)
+        rlm    = detect_reverse_line_move(bet_type, snapshot, current_odds, game_key)
+        return score_signal(
+            prob, odds, sc, fd, ua, la,
+            bet_type=bet_type, line_value=line_value,
+            mc_win_prob=mc_prob, mc_stdev=mc_sd,
+            pitcher_form=pitcher_form, platoon_score=platoon_sc,
+            rest_factor=rest_f, fatigue_factor=fatigue_f,
+            bp_rolling_factor=bp_roll_f, travel_factor=travel_f,
+            h2h_win_pct=h2h_wp, recent_ops=rec_ops,
+            lineup_confirmed=lineup_confirmed,
+            reverse_line_move=rlm,
+            bp_blended=bp_blend,
+            series_game_num=series_num,
+        )
 
     if market.get("away_ml"):
-        sig,score,edge=_score(away_win_pct,market["away_ml"],"away_ml","away_ml","ml",bet_type="away_ml")
-        edges["away_ml_edge"]=edge; edges["away_ml_score"]=score; edges["away_ml_flag"]=sig
+        sig,conf,edge=_score(away_win_pct,market["away_ml"],"away_ml","away_ml","ml",
+                             bet_type="away_ml",
+                             pitcher_form=away_pitcher_form_str,  # away pitcher facing home lineup
+                             platoon_sc=away_platoon_sc,
+                             rest_f=away_rest_f, fatigue_f=away_fatigue_f,
+                             bp_roll_f=away_bp_roll_f, travel_f=away_travel_f,
+                             mc_prob=sim["away_win_prob"], rec_ops=away_rec_ops)
+        edges["away_ml_edge"]=edge; edges["away_ml_score"]=conf; edges["away_ml_flag"]=sig
     if market.get("home_ml"):
-        sig,score,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml",bet_type="home_ml")
-        edges["home_ml_edge"]=edge; edges["home_ml_score"]=score; edges["home_ml_flag"]=sig
+        sig,conf,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml",
+                             bet_type="home_ml",
+                             pitcher_form=home_pitcher_form_str,
+                             platoon_sc=home_platoon_sc,
+                             rest_f=home_rest_f, fatigue_f=home_fatigue_f,
+                             bp_roll_f=home_bp_roll_f,
+                             mc_prob=sim["home_win_prob"], rec_ops=home_rec_ops)
+        edges["home_ml_edge"]=edge; edges["home_ml_score"]=conf; edges["home_ml_flag"]=sig
 
     if market.get("total_line") and market.get("over_odds"):
         over_prob  = mc_prob_over(sim, market["total_line"])
         under_prob = mc_prob_under(sim, market["total_line"])
         edges["over_prob"]=round(over_prob*100,1); edges["under_prob"]=round(under_prob*100,1)
         edges["fair_over"]=prob_to_american(over_prob); edges["fair_under"]=prob_to_american(under_prob)
-        sig,score,edge=_score(over_prob,market["over_odds"],"over","over","over",bet_type="over",line_value=total_line_val)
-        edges["over_edge"]=edge; edges["over_score"]=score; edges["over_flag"]=sig
-        sig,score,edge=_score(under_prob,market["under_odds"],"under","under","under",bet_type="under",line_value=total_line_val)
-        edges["under_edge"]=edge; edges["under_score"]=score; edges["under_flag"]=sig
+        sig,conf,edge=_score(over_prob,market["over_odds"],"over","over","over",
+                             bet_type="over", line_value=total_line_val,
+                             mc_prob=over_prob, rec_ops=(away_rec_ops+home_rec_ops)/2 if away_rec_ops and home_rec_ops else None)
+        edges["over_edge"]=edge; edges["over_score"]=conf; edges["over_flag"]=sig
+        sig,conf,edge=_score(under_prob,market["under_odds"],"under","under","under",
+                             bet_type="under", line_value=total_line_val, mc_prob=under_prob)
+        edges["under_edge"]=edge; edges["under_score"]=conf; edges["under_flag"]=sig
 
     if market.get("mkt_f5_line") and market.get("f5_over_odds"):
         our_f5=runs.get("proj_f5_total") or 0; mkt_f5=float(market["mkt_f5_line"])
         full_total=float(market.get("total_line") or 9.0)
         if mkt_f5/full_total<0.65 and our_f5>0:
-            f5_sim = monte_carlo_game(
-                runs.get("proj_f5_away", our_f5*0.48),
-                runs.get("proj_f5_home", our_f5*0.52),
-                n_sims=500)
-            f5op=mc_prob_over(f5_sim, mkt_f5); f5up=1-f5op
+            f5_sim=monte_carlo_game(runs.get("proj_f5_away",our_f5*0.48),runs.get("proj_f5_home",our_f5*0.52),n_sims=500)
+            f5op=mc_prob_over(f5_sim,mkt_f5); f5up=1-f5op
             edges["f5_over_prob"]=round(f5op*100,1); edges["f5_under_prob"]=round(f5up*100,1)
-            sig,score,edge=_score(f5op,market["f5_over_odds"],"over","over","over",bet_type="over",line_value=mkt_f5)
-            edges["f5_over_edge"]=edge; edges["f5_over_score"]=score; edges["f5_over_flag"]=sig
-            sig,score,edge=_score(f5up,market.get("f5_under_odds",-110),"under","under","under",bet_type="under",line_value=mkt_f5)
-            edges["f5_under_edge"]=edge; edges["f5_under_score"]=score; edges["f5_under_flag"]=sig
+            sig,conf,edge=_score(f5op,market["f5_over_odds"],"over","over","over",
+                                 bet_type="over",line_value=mkt_f5,mc_prob=f5op)
+            edges["f5_over_edge"]=edge; edges["f5_over_score"]=conf; edges["f5_over_flag"]=sig
+            sig,conf,edge=_score(f5up,market.get("f5_under_odds",-110),"under","under","under",
+                                 bet_type="under",line_value=mkt_f5,mc_prob=f5up)
+            edges["f5_under_edge"]=edge; edges["f5_under_score"]=conf; edges["f5_under_flag"]=sig
 
     if market.get("f5_away_ml"):
-        sig,score,edge=_score(away_win_pct,market["f5_away_ml"],"away_ml","away_ml","ml",bet_type="away_ml")
-        edges["f5_away_ml_edge"]=edge; edges["f5_away_ml_score"]=score; edges["f5_away_ml_flag"]=sig
+        sig,conf,edge=_score(away_win_pct,market["f5_away_ml"],"away_ml","away_ml","ml",
+                             bet_type="away_ml", mc_prob=sim["away_win_prob"])
+        edges["f5_away_ml_edge"]=edge; edges["f5_away_ml_score"]=conf; edges["f5_away_ml_flag"]=sig
     if market.get("f5_home_ml"):
-        sig,score,edge=_score(home_win_pct,market["f5_home_ml"],"home_ml","home_ml","ml",bet_type="home_ml")
-        edges["f5_home_ml_edge"]=edge; edges["f5_home_ml_score"]=score; edges["f5_home_ml_flag"]=sig
+        sig,conf,edge=_score(home_win_pct,market["f5_home_ml"],"home_ml","home_ml","ml",
+                             bet_type="home_ml", mc_prob=sim["home_win_prob"])
+        edges["f5_home_ml_edge"]=edge; edges["f5_home_ml_score"]=conf; edges["f5_home_ml_flag"]=sig
 
     rl_line=abs(float(market.get("away_rl_line",-1.5) or -1.5))
     if market.get("away_rl_odds"):
         arlp,hrlp=run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)
         edges["away_rl_prob"]=round(arlp*100,1); edges["home_rl_prob"]=round(hrlp*100,1)
         edges["fair_away_rl"]=prob_to_american(arlp); edges["fair_home_rl"]=prob_to_american(hrlp)
-        sig,score,edge=_score(arlp,market["away_rl_odds"],"away_spread","away_ml","ml",bet_type="away_spread")
-        edges["away_rl_edge"]=edge; edges["away_rl_score"]=score; edges["away_rl_flag"]=sig
+        sig,conf,edge=_score(arlp,market["away_rl_odds"],"away_spread","away_ml","ml",
+                             bet_type="away_spread",
+                             pitcher_form=away_pitcher_form_str,
+                             fatigue_f=away_fatigue_f, travel_f=away_travel_f,
+                             mc_prob=sim["away_rl_prob"])
+        edges["away_rl_edge"]=edge; edges["away_rl_score"]=conf; edges["away_rl_flag"]=sig
     if market.get("home_rl_odds"):
         hrlp_val=edges.get("home_rl_prob",50)/100 if "home_rl_prob" in edges else run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)[1]
-        sig,score,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml",bet_type="home_spread")
-        edges["home_rl_edge"]=edge; edges["home_rl_score"]=score; edges["home_rl_flag"]=sig
+        sig,conf,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml",
+                             bet_type="home_spread",
+                             pitcher_form=home_pitcher_form_str,
+                             mc_prob=sim["home_rl_prob"])
+        edges["home_rl_edge"]=edge; edges["home_rl_score"]=conf; edges["home_rl_flag"]=sig
 
     if market.get("yrfi_odds"):
         ua_yr=get_ump_signal_adjustment(ump_name,"yrfi")
         la_yr=get_line_movement_adj(game_key,current_odds,snapshot,"over")
         sc,fd=get_sharp_alignment(market,"over")
-        sig,score,edge=score_signal(yrfi_prob,market["yrfi_odds"],sc,fd,ua_yr,la_yr,bet_type="yrfi")
-        edges["yrfi_edge"]=edge; edges["yrfi_score"]=score; edges["yrfi_flag"]=sig
-        ua_nr=-ua_yr; la_nr=-la_yr
+        sig,conf,edge=score_signal(yrfi_prob,market["yrfi_odds"],sc,fd,ua_yr,la_yr,
+                                   bet_type="yrfi",
+                                   mc_win_prob=mc_wp, mc_stdev=mc_sd,
+                                   bp_blended=bp_blend, series_game_num=series_num)
+        edges["yrfi_edge"]=edge; edges["yrfi_score"]=conf; edges["yrfi_flag"]=sig
         sc,fd=get_sharp_alignment(market,"under")
-        sig,score,edge=score_signal(1-yrfi_prob,market.get("nrfi_odds",-105),sc,fd,ua_nr,la_nr,bet_type="nrfi")
-        edges["nrfi_edge"]=edge; edges["nrfi_score"]=score; edges["nrfi_flag"]=sig
+        sig,conf,edge=score_signal(1-yrfi_prob,market.get("nrfi_odds",-105),sc,fd,-ua_yr,-la_yr,
+                                   bet_type="nrfi")
+        edges["nrfi_edge"]=edge; edges["nrfi_score"]=conf; edges["nrfi_flag"]=sig
 
     if market.get("away_team_total") and market.get("away_tt_over_odds"):
         ato=mc_prob_team_total_over(runs["away_proj_runs"],runs["home_proj_runs"],"away",market["away_team_total"],sim)
         atu=1-ato
         edges["away_tt_over_prob"]=round(ato*100,1); edges["fair_away_tt_over"]=prob_to_american(ato)
-        sig,score,edge=score_signal(ato,market["away_tt_over_odds"],bet_type="over",line_value=market["away_team_total"])
-        edges["away_tt_over_edge"]=edge; edges["away_tt_over_score"]=score; edges["away_tt_over_flag"]=sig
-        sig,score,edge=score_signal(atu,market.get("away_tt_under_odds",-110),bet_type="under",line_value=market["away_team_total"])
-        edges["away_tt_under_edge"]=edge; edges["away_tt_under_score"]=score; edges["away_tt_under_flag"]=sig
+        sig,conf,edge=score_signal(ato,market["away_tt_over_odds"],bet_type="over",
+                                   line_value=market["away_team_total"],mc_win_prob=ato,
+                                   bp_blended=bp_blend)
+        edges["away_tt_over_edge"]=edge; edges["away_tt_over_score"]=conf; edges["away_tt_over_flag"]=sig
+        sig,conf,edge=score_signal(atu,market.get("away_tt_under_odds",-110),bet_type="under",
+                                   line_value=market["away_team_total"])
+        edges["away_tt_under_edge"]=edge; edges["away_tt_under_score"]=conf; edges["away_tt_under_flag"]=sig
 
     if market.get("home_team_total") and market.get("home_tt_over_odds"):
         hto=mc_prob_team_total_over(runs["away_proj_runs"],runs["home_proj_runs"],"home",market["home_team_total"],sim)
         htu=1-hto
         edges["home_tt_over_prob"]=round(hto*100,1); edges["fair_home_tt_over"]=prob_to_american(hto)
-        sig,score,edge=score_signal(hto,market["home_tt_over_odds"],bet_type="over",line_value=market["home_team_total"])
-        edges["home_tt_over_edge"]=edge; edges["home_tt_over_score"]=score; edges["home_tt_over_flag"]=sig
-        sig,score,edge=score_signal(htu,market.get("home_tt_under_odds",-110),bet_type="under",line_value=market["home_team_total"])
-        edges["home_tt_under_edge"]=edge; edges["home_tt_under_score"]=score; edges["home_tt_under_flag"]=sig
+        sig,conf,edge=score_signal(hto,market["home_tt_over_odds"],bet_type="over",
+                                   line_value=market["home_team_total"],mc_win_prob=hto,
+                                   bp_blended=bp_blend)
+        edges["home_tt_over_edge"]=edge; edges["home_tt_over_score"]=conf; edges["home_tt_over_flag"]=sig
+        sig,conf,edge=score_signal(htu,market.get("home_tt_under_odds",-110),bet_type="under",
+                                   line_value=market["home_team_total"])
+        edges["home_tt_under_edge"]=edge; edges["home_tt_under_score"]=conf; edges["home_tt_under_flag"]=sig
 
     edges["sharp_signals"] = market.get("sharp_signals","—")
 
@@ -2483,17 +2672,28 @@ def build_best_bets_str(r):
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}"),
         ("f5_over_flag","f5_over_odds","F5 OVER"),
-        ("yrfi_flag","yrfi_odds","YRFI"),("nrfi_flag","nrfi_odds","NRFI"),
+        ("yrfi_flag","yrfi_odds","YRFI"),
         ("away_tt_over_flag","away_tt_over_odds",f"{r.get('away_team','')} TT OVER"),
         ("home_tt_over_flag","home_tt_over_odds",f"{r.get('home_team','')} TT OVER"),
     ]:
         flag=str(r.get(fk,""))
-        # Show STRONG and LEAN (not WATCH/SKIP/FADE)
-        if "STRONG" in flag or ("LEAN" in flag and "FADE" not in flag):
+        # Show any signal that passed filters (has % in it)
+        if "%" in flag and "SKIP" not in flag and "FADE" not in flag:
             odds=r.get(ok,""); ek=fk.replace("_flag","_edge"); edge=r.get(ek,"")
+            sk=fk.replace("_flag","_score"); conf=r.get(sk,0)
             odds_str=f" {odds:+d}" if isinstance(odds,int) else ""
             edge_str=f" [{edge:+.1f}%]" if isinstance(edge,(int,float)) else ""
-            bets.append(f"{flag} {label}{odds_str}{edge_str}")
+            # Unit sizing from conf
+            try:
+                cf = float(conf)
+                if cf>=70: u="1.00U"
+                elif cf>=60: u="0.75U"
+                elif cf>=55: u="0.50U"
+                elif cf>=50: u="0.25U"
+                else: u="0.10U"
+            except: u="0.25U"
+            if "YRFI" in label: u="0.10U"
+            bets.append(f"{flag} {label}{odds_str}{edge_str} → {u}")
     return " | ".join(bets) if bets else "— No signals"
 
 def print_game_summary(r):
@@ -2518,8 +2718,15 @@ def print_game_summary(r):
             prob_str=f" | {prob:.1f}%" if isinstance(prob,(int,float)) else ""
             kelly_str=""
             if isinstance(prob,(int,float)) and isinstance(odds,int):
-                k=kelly_bet_size(prob/100,odds)
-                if k["bet_dollars"]>0: kelly_str=f" | 💰 ${k['bet_dollars']:.0f}"
+                # Unit sizing from confidence score
+                conf_val = float(conf) if isinstance(conf,(int,float)) else 0
+                if conf_val >= 70:    units = 1.00
+                elif conf_val >= 60:  units = 0.75
+                elif conf_val >= 55:  units = 0.50
+                elif conf_val >= 50:  units = 0.25
+                else:                 units = 0.10
+                if "YRFI" in label:   units = 0.10
+                kelly_str = f" | 🎯 {units}U"
             signals.append(f"   {flag} → {label}{odds_str}{edge_str}{prob_str}{kelly_str}")
     print(f"""
 {sep}
@@ -2552,10 +2759,12 @@ def print_game_summary(r):
 def push_tracker_rows(sheet,results):
     TRACKER_TAB="📊 Tracker"
     TRACKER_HEADERS=[
-        "Date","Game","Bet Type","Our Signal","Score (0-100)","Our Prob%",
-        "Fair Odds","Market Odds","Edge%","Our Proj Away","Our Proj Home","Our Proj Total",
+        "Date","Game","Bet Type","Confidence Signal","Conf%",
+        "Our Prob%","Fair Odds","Market Odds","Edge%",
+        "Our Proj Away","Our Proj Home","Our Proj Total",
         "BP Proj Away","BP Proj Home","BP Proj Total","BP YRFI%",
-        "Total Diff","Sharp Signal","Actual Away","Actual Home","Actual Total","Hit/Miss","Notes"
+        "Total Diff","Sharp Signal","Units",
+        "Actual Away","Actual Home","Actual Total","Hit/Miss","Notes"
     ]
     try: ws=sheet.worksheet(TRACKER_TAB)
     except: ws=sheet.add_worksheet(TRACKER_TAB,rows=1000,cols=30); ws.append_row(TRACKER_HEADERS)
@@ -2591,23 +2800,30 @@ def push_tracker_rows(sheet,results):
             flag=r.get(fk,"")
             if not flag or flag in ("","—","- "): continue
             fs=str(flag)
-            if any(x in fs for x in ("FADE","SKIP","— ","WATCH")): continue
+            if any(x in fs for x in ("FADE","SKIP","— ")): continue
+            if "%" not in fs: continue  # must have confidence % to log
             if (game.lower(),bet_label.lower()) in already_logged: continue
-            edge=r.get(ek,""); odds=r.get(ok,""); score=r.get(sk,"")
-            if "DOUBLE STRONG" in fs: sl="🔥🔥 DOUBLE STRONG"
-            elif "STRONG" in fs: sl="🔥 STRONG"
-            elif "LEAN" in fs: sl="✅ LEAN"
-            else: sl=fs
+            edge=r.get(ek,""); odds=r.get(ok,""); conf=r.get(sk,0)
+            # Unit sizing from confidence
+            try:
+                cf=float(conf)
+                if cf>=70: units="1.00U"
+                elif cf>=60: units="0.75U"
+                elif cf>=55: units="0.50U"
+                elif cf>=50: units="0.25U"
+                else: units="0.10U"
+            except: units="0.25U"
+            if "YRFI" in bet_label: units="0.10U"
             all_rows.append([
-                today,game,bet_label,sl,
-                f"{score}/100" if isinstance(score,(int,float)) else "",
+                today,game,bet_label,fs,
+                f"{conf:.1f}%" if isinstance(conf,(int,float)) else "",
                 f"{pv:.1f}%" if pv is not None else "",
                 f"{fair:+d}" if isinstance(fair,int) else "",
                 odds if odds else "",
                 f"{edge:+.1f}%" if isinstance(edge,(int,float)) else "",
                 our_away,our_home,our_total,bp_away,bp_home,bp_total,bp_yrfi,
                 total_diff,r.get("sharp_signals","-"),
-                "","","","",""
+                units,"","","","",""
             ])
     if all_rows: ws.append_rows(all_rows,value_input_option="USER_ENTERED"); print(f"  ✅ Added {len(all_rows)} signals")
     else: print("  ✅ Tracker up to date")
@@ -2648,7 +2864,8 @@ def main():
     global _current_sheet
     print("⚾  MLB BETTING MODEL — ENHANCED v2")
     print(f"   Date: {today_str()} | Win cap: {MAX_WIN_PROB*100:.0f}% | Run diff cap: {MAX_RUN_DIFF} runs")
-    print(f"   NEW: Ump + Rest + Platoon + Rolling BP + Series + Travel + Line Movement")
+    print(f"   NEW: Ump + Rest + Platoon + Rolling BP + Series + Travel + MC Simulation")
+    print(f"   SIZING (data-driven): LEAN=0.75U | DOUBLE=0.5U | STRONG=0.25U | YRFI=0.1U")
     print("="*60)
     _current_sheet=get_sheet(SHEET_NAME); sheet=_current_sheet
     print(f"   Connected: {sheet.title}")
