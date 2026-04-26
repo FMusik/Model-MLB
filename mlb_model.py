@@ -695,30 +695,25 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                         time_to_key[gt[:16]] = key
 
         def _fuzzy_time_match(papi_time_str: str) -> str:
-            """Match OddsPapi startTime to Odds API game within ±5 minutes."""
+            """Match OddsPapi startTime to Odds API game within ±10 minutes."""
             try:
                 papi_dt = datetime.datetime.fromisoformat(papi_time_str[:16])
             except:
                 return ""
-            # Exact match first
             if papi_time_str[:16] in time_to_key:
                 return time_to_key[papi_time_str[:16]]
-            # Fuzzy match within 5 minutes
             best_key, best_diff = "", 999
             for key, dt in time_to_dt.items():
                 diff = abs((papi_dt - dt).total_seconds() / 60)
-                if diff < best_diff and diff <= 5:
+                if diff < best_diff and diff <= 10:  # widened to 10 min
                     best_diff = diff
                     best_key  = key
             return best_key
 
         if data:
-            papi_times = sorted(set(str(e.get("startTime",""))[:16] for e in data))
-            odds_times = sorted(time_to_key.keys())
-            print(f"  🔍 OddsPapi: {papi_times[:3]}")
-            print(f"  🔍 OddsAPI:  {odds_times[:3]}")
-            test = _fuzzy_time_match(papi_times[0]) if papi_times else ""
-            print(f"  🔍 Fuzzy match: {papi_times[0] if papi_times else '?'} → '{test}'")
+            matched = sum(1 for e in data
+                         if _fuzzy_time_match(str(e.get("startTime",""))[:16]))
+            print(f"  🔍 OddsPapi: {len(data)} events | {matched} time-matched to OddsAPI")
 
         for event in data:
             bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
@@ -744,22 +739,6 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
 
             # Parse markets
             markets = bm_data.get("markets", {})
-            # Debug first matched game
-            if not result and markets:
-                for mk, mv in markets.items():
-                    if not isinstance(mv,dict): continue
-                    mid = mv.get("bookmakerMarketId","")
-                    if "moneyline" in mid.lower() and not mid.lower().startswith("alt"):
-                        first_oc = next(iter(mv.get("outcomes",{}).values()),{})
-                        player0  = first_oc.get("players",{}).get("0",{})
-                        print(f"  🔍 ML market: {mid[:50]}")
-                        print(f"  🔍 player0 keys: {list(player0.keys())}")
-                        print(f"  🔍 priceAmerican={player0.get('priceAmerican')} mainLine={player0.get('mainLine')} playerName='{player0.get('playerName','')}'")
-                        # Show all outcomes
-                        for oc_k, oc_v in mv.get("outcomes",{}).items():
-                            p = oc_v.get("players",{}).get("0",{})
-                            print(f"  🔍   oc[{oc_k}]: price={p.get('priceAmerican')} name='{p.get('playerName','')}'")
-                        break
             for mkey, market in markets.items():
                 if not isinstance(market, dict): continue
                 if not market.get("marketActive", True): continue
