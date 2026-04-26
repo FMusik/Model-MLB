@@ -2043,19 +2043,17 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
 
     min_edge = {"away_ml":5.0,"home_ml":5.0,"away_spread":6.0,"home_spread":6.0,
                 "over":7.0,"under":25.0,"yrfi":10.0}.get(bet_type, 7.0)
-                # UNDER raised to 25% — 44.4% win rate, losing market
-                # Run Line min lowered to 6% — 57.9% win rate, best bet type
     if edge < min_edge:
-        return "— SKIP", 0.0, edge
+        return f"— SKIP (edge {edge:.1f}%<{min_edge:.0f}%)", 0.0, edge
 
     if fair_odds < -250:
-        return "— SKIP (overconfident)", 0.0, edge
+        return f"— SKIP (overconfident fair={fair_odds})", 0.0, edge
 
     if market_odds < -200:
-        return "— SKIP (heavy fav)", 0.0, edge
+        return f"— SKIP (heavy fav mkt={market_odds})", 0.0, edge
 
     if abs(fair_odds - market_odds) > 150:
-        return "— SKIP (gap too large)", 0.0, edge
+        return f"— SKIP (gap={abs(fair_odds-market_odds)})", 0.0, edge
 
     if edge <= -EDGE_THRESHOLD:
         return "❌ FADE", 0.0, edge
@@ -2687,6 +2685,7 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              mc_prob=sim["away_win_prob"], rec_ops=away_rec_ops,
                              away_side=True)
         edges["away_ml_edge"]=edge; edges["away_ml_score"]=conf; edges["away_ml_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ Away ML: {sig} (prob={away_win_pct*100:.1f}% mkt={market.get('away_ml')} edge={edge:.1f}%)")
     if market.get("home_ml"):
         sig,conf,edge=_score(home_win_pct,market["home_ml"],"home_ml","home_ml","ml",
                              bet_type="home_ml",
@@ -2697,6 +2696,7 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              mc_prob=sim["home_win_prob"], rec_ops=home_rec_ops,
                              away_side=False)
         edges["home_ml_edge"]=edge; edges["home_ml_score"]=conf; edges["home_ml_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ Home ML: {sig} (prob={home_win_pct*100:.1f}% mkt={market.get('home_ml')} edge={edge:.1f}%)")
 
     if market.get("total_line") and market.get("over_odds"):
         over_prob  = mc_prob_over(sim, market["total_line"])
@@ -2707,9 +2707,11 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              bet_type="over", line_value=total_line_val,
                              mc_prob=over_prob, rec_ops=(away_rec_ops+home_rec_ops)/2 if away_rec_ops and home_rec_ops else None)
         edges["over_edge"]=edge; edges["over_score"]=conf; edges["over_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ OVER {market.get('total_line')}: {sig} (prob={over_prob*100:.1f}% mkt={market.get('over_odds')} edge={edge:.1f}%)")
         sig,conf,edge=_score(under_prob,market["under_odds"],"under","under","under",
                              bet_type="under", line_value=total_line_val, mc_prob=under_prob)
         edges["under_edge"]=edge; edges["under_score"]=conf; edges["under_flag"]=sig
+        if "SKIP" in str(sig): print(f"  ⛔ UNDER {market.get('total_line')}: {sig} (prob={under_prob*100:.1f}% edge={edge:.1f}%)")
 
     if market.get("mkt_f5_line") and market.get("f5_over_odds"):
         our_f5=runs.get("proj_f5_total") or 0; mkt_f5=float(market["mkt_f5_line"])
