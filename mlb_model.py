@@ -2767,10 +2767,19 @@ def push_tracker_rows(sheet,results):
         "Actual Away","Actual Home","Actual Total","Hit/Miss","Notes"
     ]
     try: ws=sheet.worksheet(TRACKER_TAB)
-    except: ws=sheet.add_worksheet(TRACKER_TAB,rows=1000,cols=30); ws.append_row(TRACKER_HEADERS)
+    except: ws=sheet.add_worksheet(TRACKER_TAB,rows=1000,cols=30)
     today=today_str()
     try: all_vals=ws.get_all_values()
     except: all_vals=[]
+    # Always ensure header row exists and is correct
+    if not all_vals or not all_vals[0] or all_vals[0][0] != "Date":
+        if all_vals and all_vals[0] and all_vals[0][0] != "Date":
+            ws.insert_row(TRACKER_HEADERS, 1)
+        else:
+            ws.append_row(TRACKER_HEADERS)
+        print(f"  ✅ Tracker headers written")
+        try: all_vals=ws.get_all_values()
+        except: all_vals=[]
     already_logged=set()
     for row in all_vals:
         if not row or row[0]!=today: continue
@@ -2823,7 +2832,8 @@ def push_tracker_rows(sheet,results):
                 f"{edge:+.1f}%" if isinstance(edge,(int,float)) else "",
                 our_away,our_home,our_total,bp_away,bp_home,bp_total,bp_yrfi,
                 total_diff,r.get("sharp_signals","-"),
-                units,"","","","",""
+                units,
+                "","","","",""  # Actual Away, Actual Home, Actual Total, Hit/Miss, Notes
             ])
     if all_rows: ws.append_rows(all_rows,value_input_option="USER_ENTERED"); print(f"  ✅ Added {len(all_rows)} signals")
     else: print("  ✅ Tracker up to date")
