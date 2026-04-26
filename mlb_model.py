@@ -670,44 +670,39 @@ def _fetch_oddspapi_book(bookmaker: str) -> dict:
             timeout=15,
         )
         data = r.json()
-
-        print(f"\n  🔬 OddsPapi diagnostic for bookmaker={bookmaker}")
-        print(f"  🔬 HTTP status: {r.status_code}")
-        print(f"  🔬 Response type: {type(data).__name__}")
+        print(f"\n  DIAG OddsPapi bookmaker={bookmaker}")
+        print(f"  DIAG status={r.status_code} type={type(data).__name__}")
         if isinstance(data, dict):
-            print(f"  🔬 Top-level keys: {list(data.keys())}")
-            print(f"  🔬 First 800 chars: {json.dumps(data, indent=2, default=str)[:800]}")
+            print(f"  DIAG dict_keys={list(data.keys())}")
+            print(f"  DIAG body={json.dumps(data, indent=2, default=str)[:800]}")
         elif isinstance(data, list):
-            print(f"  🔬 List length: {len(data)}")
-            if data:
+            print(f"  DIAG list_len={len(data)}")
+            if data and isinstance(data[0], dict):
                 first = data[0]
-                if isinstance(first, dict):
-                    print(f"  🔬 Event[0] keys: {list(first.keys())}")
-                    skinny = {k: v for k, v in first.items() if k != "bookmakerOdds"}
-                    print(f"  🔬 Event[0] (no odds): {json.dumps(skinny, indent=2, default=str)[:1500]}")
-                    bm = first.get("bookmakerOdds", {})
-                    if isinstance(bm, dict):
-                        print(f"  🔬 bookmakerOdds keys: {list(bm.keys())}")
-                        for bk_name, bk_val in bm.items():
-                            if isinstance(bk_val, dict):
-                                print(f"  🔬   {bk_name}: {len(bk_val)} markets")
-                                first_mkt_key = next(iter(bk_val), None)
-                                if first_mkt_key:
-                                    mkt = bk_val[first_mkt_key]
-                                    if isinstance(mkt, dict):
-                                        print(f"  🔬   sample market keys: {list(mkt.keys())}")
-                                        print(f"  🔬   sample marketId: {mkt.get('bookmakerMarketId','?')}")
-                                        outs = mkt.get("outcomes", {})
-                                        if isinstance(outs, dict) and outs:
-                                            first_oc_key = next(iter(outs))
-                                            print(f"  🔬   sample outcome: {json.dumps(outs[first_oc_key], indent=2, default=str)[:500]}")
-                            break
-        print(f"  🔬 END DIAGNOSTIC\n")
-
+                print(f"  DIAG event0_keys={list(first.keys())}")
+                skinny = {k: v for k, v in first.items() if k != 'bookmakerOdds'}
+                print(f"  DIAG event0_body={json.dumps(skinny, indent=2, default=str)[:1500]}")
+                bm = first.get('bookmakerOdds', {})
+                if isinstance(bm, dict):
+                    print(f"  DIAG bookmakers={list(bm.keys())}")
+                    for bk_name, bk_val in bm.items():
+                        if isinstance(bk_val, dict):
+                            print(f"  DIAG {bk_name}_market_count={len(bk_val)}")
+                            mkt_key = next(iter(bk_val), None)
+                            if mkt_key:
+                                mkt = bk_val[mkt_key]
+                                if isinstance(mkt, dict):
+                                    print(f"  DIAG market_keys={list(mkt.keys())}")
+                                    print(f"  DIAG marketId={mkt.get('bookmakerMarketId','?')}")
+                                    outs = mkt.get('outcomes', {})
+                                    if isinstance(outs, dict) and outs:
+                                        oc_key = next(iter(outs))
+                                        print(f"  DIAG outcome={json.dumps(outs[oc_key], indent=2, default=str)[:500]}")
+                        break
+        print(f"  DIAG END\n")
         return {}
-
     except Exception as e:
-        print(f"  ⚠️  OddsPapi ({bookmaker}): {e}")
+        print(f"  DIAG OddsPapi error ({bookmaker}): {e}")
         import traceback
         traceback.print_exc()
         return {}
