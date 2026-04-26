@@ -684,19 +684,27 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                 gt = gdata.get("game_time","")
                 if gt:
                     try:
-                        # Parse UTC time and convert to ET (+4hrs for EDT)
                         gt_clean = gt.replace("Z","+00:00")
                         if "+" not in gt_clean and len(gt_clean) >= 16:
                             gt_clean += "+00:00"
                         utc_dt = datetime.datetime.fromisoformat(gt_clean)
-                        et_dt  = utc_dt + datetime.timedelta(hours=4)  # UTC → ET
+                        et_dt  = utc_dt + datetime.timedelta(hours=4)
                         time_to_key[et_dt.strftime("%Y-%m-%dT%H:%M")] = key
                     except:
-                        time_to_key[gt[:16]] = key  # fallback
-            if data:
-                sample_papi = str(data[0].get("startTime",""))[:16]
-                sample_odds = list(time_to_key.keys())[0] if time_to_key else "none"
-                print(f"  🔍 Time match: OddsPapi={sample_papi} | OddsAPI(ET)={sample_odds}")
+                        time_to_key[gt[:16]] = key
+            # Debug: show all times to find offset
+            papi_times = sorted(set(str(e.get("startTime",""))[:16] for e in data))
+            odds_times = sorted(time_to_key.keys())
+            print(f"  🔍 OddsPapi times: {papi_times[:3]}")
+            print(f"  🔍 OddsAPI(+4h):   {odds_times[:3]}")
+            # Try to find actual offset
+            if papi_times and odds_times:
+                try:
+                    pt = datetime.datetime.fromisoformat(papi_times[0])
+                    ot = datetime.datetime.fromisoformat(odds_times[0])
+                    diff = round((pt - ot).total_seconds()/3600, 1)
+                    print(f"  🔍 Actual offset needed: {diff:+.1f}hrs")
+                except: pass
 
         for event in data:
             bm_data = event.get("bookmakerOdds",{}).get(bookmaker,{})
