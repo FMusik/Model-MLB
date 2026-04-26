@@ -746,58 +746,81 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
             markets = bm_data.get("markets", {})
             # Debug first matched game
             if not result and markets:
-                first_mkt = next(iter(markets.values()), {})
-                first_oc  = next(iter(first_mkt.get("outcomes",{}).values()), {})
-                print(f"  🔍 Sample outcome keys: {list(first_oc.keys())}")
-                print(f"  🔍 Sample market_id: {first_mkt.get('bookmakerMarketId','')[:60]}")
-                print(f"  🔍 Sample oc_name: '{first_oc.get('name','') or first_oc.get('playerName','')}'")
-                print(f"  🔍 priceAmerican: {first_oc.get('priceAmerican')} mainLine: {first_oc.get('mainLine')}")
+                for mk, mv in markets.items():
+                    if not isinstance(mv,dict): continue
+                    mid = mv.get("bookmakerMarketId","")
+                    if "moneyline" in mid.lower() and not mid.lower().startswith("alt"):
+                        first_oc = next(iter(mv.get("outcomes",{}).values()),{})
+                        player0  = first_oc.get("players",{}).get("0",{})
+                        print(f"  🔍 ML market: {mid[:50]}")
+                        print(f"  🔍 player0 keys: {list(player0.keys())}")
+                        print(f"  🔍 priceAmerican={player0.get('priceAmerican')} mainLine={player0.get('mainLine')}")
+                        bm_oc = first_oc.get("bookmakerOutcomeId","")
+                        print(f"  🔍 bookmakerOutcomeId: {bm_oc}")
+                        break
             for mkey, market in markets.items():
                 if not isinstance(market, dict): continue
                 if not market.get("marketActive", True): continue
                 market_id = str(market.get("bookmakerMarketId","")).lower()
-                is_ml     = "/moneyline" in market_id or "moneyline" in market_id
-                is_spread = "/spreads" in market_id or "spread" in market_id
+                # Skip alt lines — only use main lines
+                if market_id.startswith("altline"): continue
+                is_ml     = "/moneyline" in market_id
+                is_spread = "/spreads" in market_id and "team" not in market_id
                 is_total  = "/totals" in market_id and "team" not in market_id
-                is_tt     = "teamtotal" in market_id or "team_total" in market_id
+                is_tt     = "teamtotal" in market_id
 
                 for oc_id, oc in market.get("outcomes",{}).items():
                     if not isinstance(oc, dict): continue
-                    if not oc.get("active", True): continue
-                    if not oc.get("mainLine", True): continue
-                    price_am  = oc.get("priceAmerican")
-                    price_dec = oc.get("price")
+                    # Odds are inside oc["players"]["0"] not directly in oc
+                    players = oc.get("players",{})
+                    player  = players.get("0") or players.get(0) or {}
+                    if not isinstance(player, dict): continue
+                    if not player.get("mainLine", True): continue
+                    if not player.get("active", True): continue
+
+                    price_am  = player.get("priceAmerican")
+                    price_dec = player.get("price")
                     if price_am is None and price_dec is None: continue
-                    american = int(price_am) if price_am is not None else _to_american(float(price_dec))
-                    oc_name  = str(oc.get("name","") or "").lower()
+                    american  = int(price_am) if price_am is not None else _to_american(float(price_dec))
+                    # Name is in player, outcome, or bookmakerOutcomeId
+                    oc_name   = str(player.get("name","") or player.get("playerName","") or
+                                    oc.get("name","") or "").lower()
+                    bm_oc_id  = str(oc.get("bookmakerOutcomeId","")).lower()
+
+                    # Determine home/away from outcome id or name
+                    # bookmakerOutcomeId contains "0.0/home" or "0.0/away"
+                    is_home = "home" in bm_oc_id or "home" in oc_name or bm_oc_id.endswith("/1")
+                    is_away = "away" in bm_oc_id or "away" in oc_name or bm_oc_id.endswith("/2")
+                    is_over  = "over" in bm_oc_id or "over" in oc_name
+                    is_under = "under" in bm_oc_id or "under" in oc_name
 
                     if is_ml:
-                        if "home" in oc_name or oc_name in ("1","h"):   od["home_ml"] = american
-                        elif "away" in oc_name or oc_name in ("2","a"): od["away_ml"] = american
+                        if is_home:   od["home_ml"] = american
+                        elif is_away: od["away_ml"] = american
                     elif is_spread:
-                        line_val = oc.get("line") or oc.get("handicap")
+                        line_val = player.get("line") or player.get("handicap")
                         if line_val is None: continue
                         try: line_f = float(line_val)
                         except: continue
-                        if "home" in oc_name or oc_name in ("1","h"):   od["home_rl_odds"] = american
-                        elif "away" in oc_name or oc_name in ("2","a"): od["away_rl_odds"] = american; od["away_rl_line"] = line_f
+                        if is_home:   od["home_rl_odds"] = american
+                        elif is_away: od["away_rl_odds"] = american; od["away_rl_line"] = line_f
                     elif is_total:
-                        line_val = oc.get("line") or oc.get("limit")
+                        line_val = player.get("line") or player.get("limit")
                         if line_val is None: continue
                         try: line_f = float(line_val)
                         except: continue
-                        if "over" in oc_name:    od["total_line"] = line_f; od["over_odds"]  = american
-                        elif "under" in oc_name: od["under_odds"] = american
+                        if is_over:    od["total_line"] = line_f; od["over_odds"]  = american
+                        elif is_under: od["under_odds"] = american
                     elif is_tt:
-                        line_val = oc.get("line") or oc.get("limit")
+                        line_val = player.get("line") or player.get("limit")
                         if line_val is None: continue
                         try: line_f = float(line_val)
                         except: continue
                         is_home_tt = "home" in market_id
-                        if "over" in oc_name:
+                        if is_over:
                             if is_home_tt: od["home_team_total"]=line_f; od["home_tt_over_odds"]=american
                             else: od["away_team_total"]=line_f; od["away_tt_over_odds"]=american
-                        elif "under" in oc_name:
+                        elif is_under:
                             if is_home_tt: od["home_tt_under_odds"]=american
                             else: od["away_tt_under_odds"]=american
 
