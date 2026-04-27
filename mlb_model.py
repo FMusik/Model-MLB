@@ -1150,10 +1150,8 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
         rows    = list(reader)
         if not rows: return {}
 
-        # Debug column names on first call
-        if pitcher_id and not hasattr(get_savant_pitcher, '_cols_printed'):
-            get_savant_pitcher._cols_printed = True
-            print(f"  🔍 Savant pitcher cols: {list(rows[0].keys())[:15]}")
+        # Debug — print all column names once
+        print(f"  🔍 Savant cols: {list(rows[0].keys())}")
 
         for row in rows:
             pid = (row.get("player_id") or row.get("pitcher") or
