@@ -1124,46 +1124,46 @@ SAVANT_BASE = "https://baseballsavant.mlb.com/statcast_search/csv"
 
 def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
     """
-    Fetch pitcher Statcast data from Baseball Savant expected stats leaderboard.
-    Uses JSON endpoint — more reliable than CSV search.
+    Fetch pitcher Statcast data from Baseball Savant leaderboard.
+    Returns xwOBA, barrel%, whiff%, exit velo, quality score 0-10.
     """
     try:
         url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
         params = {
-            "type":     "pitcher",
-            "year":     season,
+            "type": "pitcher",
+            "year": season,
             "position": "",
-            "team":     "",
-            "min":      "q",  # qualified pitchers
-            "csv":      "false",
+            "team": "",
+            "min": "q",
+            "csv": "true",  # request CSV
         }
         r = requests.get(url, params=params, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0",
-                                  "Accept": "application/json"})
+                         headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             print(f"  ⚠️  Savant pitcher HTTP {r.status_code}")
             return {}
 
-        data = r.json()
-        players = data if isinstance(data, list) else \
-                  data.get("data", data.get("players", []))
+        # Parse CSV with utf-8-sig to handle BOM
+        import csv, io
+        content = r.content.decode("utf-8-sig")
+        reader  = csv.DictReader(io.StringIO(content))
 
-        for p in players:
-            pid = (p.get("player_id") or p.get("pitcher") or
-                   p.get("pitcher_id") or p.get("xMLBAMID",""))
-            if str(pid) == str(pitcher_id):
-                result = {}
-                def sf(key):
-                    v = p.get(key)
-                    try: return float(v) if v is not None else None
+        for row in reader:
+            pid = (row.get("player_id") or row.get("pitcher") or
+                   row.get("pitcher_id") or row.get("xMLBAMID","")).strip()
+            if pid == str(pitcher_id):
+                def sf(k):
+                    v = row.get(k,"").strip()
+                    try: return float(v) if v else None
                     except: return None
 
-                xwoba  = sf("est_woba") or sf("xwoba") or sf("xwOBA")
-                barrel = sf("barrel_batted_rate") or sf("brl_percent") or sf("barrel_pct")
-                whiff  = sf("whiff_percent") or sf("whiff_pct")
+                xwoba  = sf("est_woba") or sf("xwoba")
+                barrel = sf("barrel_batted_rate") or sf("brl_percent")
+                whiff  = sf("whiff_percent")
                 ev     = sf("launch_speed_avg") or sf("exit_velocity_avg")
                 hard   = sf("hard_hit_percent")
 
+                result = {}
                 if xwoba:  result["sv_xwoba"]      = round(xwoba, 3)
                 if barrel: result["sv_barrel_pct"] = round(barrel, 1)
                 if whiff:  result["sv_whiff_pct"]  = round(whiff, 1)
@@ -1177,8 +1177,7 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
                     result["sv_quality_score"] = round((xs + bs + ws) / 3, 1)
                 return result
 
-        # Not found in leaderboard (may not have enough IP)
-        return {}
+        return {}  # pitcher not found (not enough IP yet)
 
     except Exception as e:
         print(f"  ⚠️  Savant pitcher {pitcher_id}: {type(e).__name__}: {e}")
@@ -1188,37 +1187,34 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
 def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
     """
     Fetch team batting Statcast data from Baseball Savant leaderboard.
-    Uses JSON endpoint — more reliable than CSV search.
+    Returns avg exit velo, barrel%, xwOBA, lineup score 0-10.
     """
     try:
         url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
         params = {
-            "type":     "batter",
-            "year":     season,
+            "type": "batter",
+            "year": season,
             "position": "",
-            "team":     team_abbrev,
-            "min":      50,
-            "csv":      "false",
+            "team": team_abbrev,
+            "min": 50,
+            "csv": "true",
         }
         r = requests.get(url, params=params, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0",
-                                  "Accept": "application/json"})
+                         headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
             return {}
 
-        data = r.json()
-        players = data if isinstance(data, list) else \
-                  data.get("data", data.get("players", []))
+        import csv, io
+        content = r.content.decode("utf-8-sig")
+        reader  = list(csv.DictReader(io.StringIO(content)))
+        if not reader: return {}
 
-        if not players: return {}
-
-        # Average across all qualifying batters
         def avg_field(key):
             vals = []
-            for p in players:
-                v = p.get(key)
+            for row in reader:
+                v = row.get(key,"").strip()
                 try:
-                    if v is not None: vals.append(float(v))
+                    if v: vals.append(float(v))
                 except: pass
             return round(sum(vals)/len(vals), 3) if vals else None
 
@@ -3656,3 +3652,4 @@ if __name__=="__main__":
         print("\n🏁 Done!")
     else:
         main()
+      
