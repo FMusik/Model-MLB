@@ -1124,83 +1124,83 @@ SAVANT_BASE = "https://baseballsavant.mlb.com/statcast_search/csv"
 
 def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
     """
-    Fetch pitcher Statcast data from Baseball Savant.
-    Uses expected_statistics for xwOBA/xERA + arsenal for whiff/barrel.
+    Fetch pitcher Statcast from Baseball Savant.
+    Blends current + prior season — handles 0-1 start pitchers gracefully.
+    PA weights: 0 starts=prior year only, 1-2 starts=80% prior, 5+ starts=current only.
     """
     try:
         import csv, io
 
+        def fetch_expected(yr):
+            r = requests.get(
+                "https://baseballsavant.mlb.com/leaderboard/expected_statistics",
+                params={"type":"pitcher","year":yr,"min":"q","csv":"true"},
+                timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code != 200: return {}
+            for row in csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))):
+                if str(row.get("player_id","")).strip() == str(pitcher_id):
+                    def sf(k):
+                        v=row.get(k,"").strip()
+                        try: return float(v) if v else None
+                        except: return None
+                    return {"xwoba":sf("est_woba"),"xera":sf("xera"),"pa":sf("pa") or 0}
+            return {}
+
+        def fetch_statcast(yr):
+            r = requests.get(
+                "https://baseballsavant.mlb.com/leaderboard/statcast",
+                params={"type":"pitcher","year":yr,"position":"","team":"",
+                        "min":10,"csv":"true"},
+                timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+            if r.status_code != 200: return {}
+            for row in csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))):
+                if str(row.get("player_id","")).strip() == str(pitcher_id):
+                    def sf(k):
+                        v=row.get(k,"").strip()
+                        try: return float(v) if v else None
+                        except: return None
+                    return {"barrel":sf("brl_percent"),"ev":sf("avg_hit_speed"),
+                            "ev95":sf("ev95percent")}
+            return {}
+
+        # Fetch current + prior season
+        cur  = fetch_expected(season)
+        prev = fetch_expected(season - 1)
+        sc   = fetch_statcast(season)
+        sp   = fetch_statcast(season - 1)
+
+        # Blend weights based on current PA
+        cur_pa = cur.get("pa", 0) or 0
+        if cur_pa >= 150:   w_cur, w_prev = 1.0, 0.0
+        elif cur_pa >= 80:  w_cur, w_prev = 0.7, 0.3
+        elif cur_pa >= 30:  w_cur, w_prev = 0.4, 0.6
+        elif cur_pa > 0:    w_cur, w_prev = 0.1, 0.9
+        else:               w_cur, w_prev = 0.0, 1.0
+
+        def blend(key, d1, d2):
+            v1 = d1.get(key); v2 = d2.get(key)
+            if v1 is not None and v2 is not None:
+                return round(v1*w_cur + v2*w_prev, 3)
+            return v1 or v2
+
         result = {}
+        xwoba  = blend("xwoba",  cur, prev)
+        xera   = blend("xera",   cur, prev)
+        barrel = blend("barrel", sc,  sp)
+        ev     = blend("ev",     sc,  sp)
+        ev95   = blend("ev95",   sc,  sp)
 
-        # Endpoint 1: Expected stats (xwOBA, xERA)
-        r1 = requests.get(
-            "https://baseballsavant.mlb.com/leaderboard/expected_statistics",
-            params={"type":"pitcher","year":season,"min":"q","csv":"true"},
-            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
-        if r1.status_code == 200:
-            rows = list(csv.DictReader(io.StringIO(r1.content.decode("utf-8-sig"))))
-            for row in rows:
-                if str(row.get("player_id","")).strip() == str(pitcher_id):
-                    def sf(k): 
-                        v=row.get(k,"").strip()
-                        try: return float(v) if v else None
-                        except: return None
-                    xwoba = sf("est_woba")
-                    xera  = sf("xera")
-                    if xwoba: result["sv_xwoba"] = round(xwoba, 3)
-                    if xera:  result["sv_xera"]  = round(xera, 2)
-                    break
+        if xwoba:  result["sv_xwoba"]      = xwoba
+        if xera:   result["sv_xera"]       = round(xera, 2)
+        if barrel: result["sv_barrel_pct"] = round(barrel, 1)
+        if ev:     result["sv_exit_velo"]  = round(ev, 1)
+        if ev95:   result["sv_ev95_pct"]   = round(ev95, 1)
+        if cur_pa: result["sv_pa"]         = int(cur_pa)
 
-        # Endpoint 2: Statcast leaderboard (barrel count + exit velo)
-        r2 = requests.get(
-            "https://baseballsavant.mlb.com/leaderboard/statcast",
-            params={"type":"pitcher","year":season,"position":"","team":"",
-                    "min":10,"csv":"true"},  # lowered from 50 to catch more pitchers
-            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
-        if r2.status_code == 200 and r2.content:
-            rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
-            for row in rows2:
-                if str(row.get("player_id","")).strip() == str(pitcher_id):
-                    def sf2(k):
-                        v=row.get(k,"").strip()
-                        try: return float(v) if v else None
-                        except: return None
-                    barrel = sf2("brl_percent")
-                    ev     = sf2("avg_hit_speed")
-                    ev95   = sf2("ev95percent")
-                    if barrel: result["sv_barrel_pct"] = round(barrel, 1)
-                    if ev:     result["sv_exit_velo"]  = round(ev, 1)
-                    if ev95:   result["sv_ev95_pct"]   = round(ev95, 1)
-                    break
+        is_partial = cur_pa < 80
+        if is_partial: result["sv_partial"] = True
 
-        # Endpoint 3: Swing/miss data for whiff%
-        r3 = requests.get(
-            "https://baseballsavant.mlb.com/leaderboard/bat-tracking",
-            params={"attackZone":"","batSide":"","contactType":"","count":"",
-                    "year":season,"minSwings":50,"type":"pitcher","csv":"true"},
-            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
-        if r3.status_code == 200 and r3.content:
-            rows3 = list(csv.DictReader(io.StringIO(r3.content.decode("utf-8-sig"))))
-            if rows3 and "whiff" not in str(list(rows3[0].keys())).lower():
-                # wrong endpoint — skip silently
-                pass
-            else:
-                for row in rows3:
-                    if str(row.get("player_id","") or row.get("pitcher_id","")).strip() == str(pitcher_id):
-                        def sf3(k):
-                            v=row.get(k,"").strip()
-                            try: return float(v) if v else None
-                            except: return None
-                        whiff = sf3("whiff_percent") or sf3("whiff_pct") or sf3("whiff_rate")
-                        if whiff: result["sv_whiff_pct"] = round(whiff, 1)
-                        break
-
-        # Quality score using what we have
-        xwoba  = result.get("sv_xwoba")
-        xera   = result.get("sv_xera")
-        barrel = result.get("sv_barrel_pct")
-        ev95   = result.get("sv_ev95_pct")  # % of balls hit 95mph+ against
-
+        # Quality score
         if xwoba and xera:
             xera_score   = max(0, min(10, (5.00 - xera) / 0.30))
             xwoba_score  = max(0, min(10, (0.380 - xwoba) / 0.010))
@@ -1209,8 +1209,15 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
             result["sv_quality_score"] = round(
                 xera_score*0.35 + xwoba_score*0.35 +
                 barrel_score*0.15 + ev95_score*0.15, 1)
+        elif barrel:
+            barrel_score = max(0, min(10, (12.0 - barrel) / 1.0))
+            result["sv_quality_score"] = round(barrel_score * 0.5 + 5.0 * 0.5, 1)
 
         return result
+
+    except Exception as e:
+        print(f"  ⚠️  Savant pitcher {pitcher_id}: {type(e).__name__}: {e}")
+        return {}
 
     except Exception as e:
         print(f"  ⚠️  Savant pitcher {pitcher_id}: {type(e).__name__}: {e}")
@@ -2595,9 +2602,11 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     if not away_sv_pitch and not home_sv_pitch:
         print(f"  ⚠️  Savant: no pitcher data returned (API may be rate-limiting or down)")
     if away_sv_pitch:
-        print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | xERA={away_sv_pitch.get('sv_xera','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10")
+        partial = " (partial)" if away_sv_pitch.get("sv_partial") else ""
+        print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | xERA={away_sv_pitch.get('sv_xera','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10{partial}")
     if home_sv_pitch:
-        print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | xERA={home_sv_pitch.get('sv_xera','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10")
+        partial = " (partial)" if home_sv_pitch.get("sv_partial") else ""
+        print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | xERA={home_sv_pitch.get('sv_xera','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10{partial}")
     if away_sv_bat:
         print(f"    {info['away_team']} lineup: EV={away_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={away_sv_bat.get('sv_team_barrel_pct','N/A')} | EV95%={away_sv_bat.get('sv_team_ev95','N/A')} | Score={away_sv_bat.get('sv_lineup_score','N/A')}/10")
     if home_sv_bat:
