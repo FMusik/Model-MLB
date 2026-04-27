@@ -1151,7 +1151,7 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
                     if xera:  result["sv_xera"]  = round(xera, 2)
                     break
 
-        # Endpoint 2: Statcast leaderboard (whiff%, barrel%, hard hit%, exit velo)
+        # Endpoint 2: Statcast leaderboard (barrel count + exit velo)
         r2 = requests.get(
             "https://baseballsavant.mlb.com/leaderboard/statcast",
             params={"type":"pitcher","year":season,"position":"","team":"",
@@ -1159,10 +1159,44 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
         if r2.status_code == 200 and r2.content:
             rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
-            if rows2 and not result.get("_arsenal_debug"):
-                result["_arsenal_debug"] = True
-                print(f"  🔍 Statcast cols: {[k for k in rows2[0].keys() if any(x in k.lower() for x in ['whiff','barrel','hard','exit','launch'])]}")
             for row in rows2:
+                if str(row.get("player_id","")).strip() == str(pitcher_id):
+                    def sf2(k):
+                        v=row.get(k,"").strip()
+                        try: return float(v) if v else None
+                        except: return None
+                    # barrel% = barrels / bip * 100
+                    barrels = sf2("barrels")
+                    bip     = sf2("bip") or sf2("batted_balls")
+                    if barrels and bip and bip > 0:
+                        result["sv_barrel_pct"] = round(barrels/bip*100, 1)
+                    ev = sf2("launch_speed_avg") or sf2("exit_velocity_avg") or sf2("avg_hit_speed")
+                    hh = sf2("hard_hit_percent") or sf2("hard_hit_rate")
+                    if ev: result["sv_exit_velo"] = round(ev, 1)
+                    if hh: result["sv_hard_hit"]  = round(hh, 1)
+                    break
+
+        # Endpoint 3: Swing/miss data for whiff%
+        r3 = requests.get(
+            "https://baseballsavant.mlb.com/leaderboard/bat-tracking",
+            params={"attackZone":"","batSide":"","contactType":"","count":"",
+                    "year":season,"minSwings":50,"type":"pitcher","csv":"true"},
+            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+        if r3.status_code == 200 and r3.content:
+            rows3 = list(csv.DictReader(io.StringIO(r3.content.decode("utf-8-sig"))))
+            if rows3 and "whiff" not in str(list(rows3[0].keys())).lower():
+                # wrong endpoint — skip silently
+                pass
+            else:
+                for row in rows3:
+                    if str(row.get("player_id","") or row.get("pitcher_id","")).strip() == str(pitcher_id):
+                        def sf3(k):
+                            v=row.get(k,"").strip()
+                            try: return float(v) if v else None
+                            except: return None
+                        whiff = sf3("whiff_percent") or sf3("whiff_pct") or sf3("whiff_rate")
+                        if whiff: result["sv_whiff_pct"] = round(whiff, 1)
+                        break
                 if str(row.get("pitcher_id","") or row.get("player_id","")).strip() == str(pitcher_id):
                     def sf2(k):
                         v=row.get(k,"").strip()
