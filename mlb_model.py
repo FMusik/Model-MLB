@@ -1256,8 +1256,7 @@ def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
 
         # Use correct column names — debug first row to find xwoba key
         if reader:
-            xwoba_keys = [k for k in reader[0].keys() if 'woba' in k.lower() or 'est' in k.lower()]
-            # Use est_woba (expected woba) not regular woba
+            print(f"  🔍 Batter xwoba cols: {[k for k in reader[0].keys() if 'woba' in k.lower() or 'est' in k.lower()]}")
             xwob = avg_field("est_woba", "xwoba", "expected_woba")
 
         # Get barrel/EV from statcast endpoint for batters
