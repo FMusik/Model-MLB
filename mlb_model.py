@@ -1147,8 +1147,15 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
         import csv, io
         content = r.content.decode("utf-8-sig")
         reader  = csv.DictReader(io.StringIO(content))
+        rows    = list(reader)
+        if not rows: return {}
 
-        for row in reader:
+        # Debug column names on first call
+        if pitcher_id and not hasattr(get_savant_pitcher, '_cols_printed'):
+            get_savant_pitcher._cols_printed = True
+            print(f"  🔍 Savant pitcher cols: {list(rows[0].keys())[:15]}")
+
+        for row in rows:
             pid = (row.get("player_id") or row.get("pitcher") or
                    row.get("pitcher_id") or row.get("xMLBAMID","")).strip()
             if pid == str(pitcher_id):
@@ -3652,4 +3659,3 @@ if __name__=="__main__":
         print("\n🏁 Done!")
     else:
         main()
-      
