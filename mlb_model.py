@@ -1151,16 +1151,17 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
                     if xera:  result["sv_xera"]  = round(xera, 2)
                     break
 
-        # Endpoint 2: Pitch arsenal stats (whiff%, barrel%, hard hit%)
+        # Endpoint 2: Statcast leaderboard (whiff%, barrel%, hard hit%, exit velo)
         r2 = requests.get(
-            "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats",
-            params={"type":"pitcher","year":season,"min":50,"csv":"true"},
+            "https://baseballsavant.mlb.com/leaderboard/statcast",
+            params={"type":"pitcher","year":season,"position":"","team":"",
+                    "min":50,"csv":"true"},
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
-        if r2.status_code == 200:
+        if r2.status_code == 200 and r2.content:
             rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
-            if rows2:
-                print(f"  🔍 Arsenal cols: {list(rows2[0].keys())[:10]}")
-                print(f"  🔍 Arsenal sample pitcher_id: {rows2[0].get('pitcher_id','') or rows2[0].get('player_id','')}")
+            if rows2 and not result.get("_arsenal_debug"):
+                result["_arsenal_debug"] = True
+                print(f"  🔍 Statcast cols: {[k for k in rows2[0].keys() if any(x in k.lower() for x in ['whiff','barrel','hard','exit','launch'])]}")
             for row in rows2:
                 if str(row.get("pitcher_id","") or row.get("player_id","")).strip() == str(pitcher_id):
                     def sf2(k):
