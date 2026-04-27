@@ -1219,82 +1219,51 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
 
 def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
     """
-    Fetch team batting Statcast data from Baseball Savant leaderboard.
-    Returns avg exit velo, barrel%, xwOBA, lineup score 0-10.
+    Fetch team batting Statcast data from Baseball Savant.
+    Uses statcast leaderboard for EV, barrel%, ev95%.
+    Lineup score based on exit velo + barrel rate.
     """
     try:
-        url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-        params = {
-            "type": "batter",
-            "year": season,
-            "position": "",
-            "team": team_abbrev,
-            "min": 50,
-            "csv": "true",
-        }
-        r = requests.get(url, params=params, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
+        import csv, io
+        r = requests.get(
+            "https://baseballsavant.mlb.com/leaderboard/statcast",
+            params={"type":"batter","year":season,"position":"",
+                    "team":team_abbrev,"min":10,"csv":"true"},
+            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+
+        if r.status_code != 200 or not r.content:
             return {}
 
-        import csv, io
-        content = r.content.decode("utf-8-sig")
-        reader  = list(csv.DictReader(io.StringIO(content)))
-        if not reader: return {}
+        rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+        if not rows: return {}
 
-        def avg_field(*keys):
+        def avg(*keys):
             for key in keys:
                 vals = []
-                for row in reader:
+                for row in rows:
                     v = row.get(key,"").strip()
                     try:
                         if v: vals.append(float(v))
                     except: pass
-                if vals:
-                    return round(sum(vals)/len(vals), 3)
+                if vals: return round(sum(vals)/len(vals), 3)
             return None
 
-        # Use correct column names — debug first row to find xwoba key
-        if reader:
-            print(f"  🔍 Batter xwoba cols: {[k for k in reader[0].keys() if 'woba' in k.lower() or 'est' in k.lower()]}")
-            xwob = avg_field("est_woba", "xwoba", "expected_woba")
-
-        # Get barrel/EV from statcast endpoint for batters
-        r3 = requests.get(
-            "https://baseballsavant.mlb.com/leaderboard/statcast",
-            params={"type":"batter","year":season,"position":"","team":team_abbrev,
-                    "min":10,"csv":"true"},
-            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
-
-        ev = brl = ev95 = None
-        if r3.status_code == 200 and r3.content:
-            rows3 = list(csv.DictReader(io.StringIO(r3.content.decode("utf-8-sig"))))
-            def avg3(*keys):
-                for key in keys:
-                    vals = []
-                    for row in rows3:
-                        v = row.get(key,"").strip()
-                        try:
-                            if v: vals.append(float(v))
-                        except: pass
-                    if vals: return round(sum(vals)/len(vals),3)
-                return None
-            ev   = avg3("avg_hit_speed")
-            brl  = avg3("brl_percent")
-            ev95 = avg3("ev95percent")
+        ev   = avg("avg_hit_speed")
+        brl  = avg("brl_percent")
+        ev95 = avg("ev95percent")
 
         result = {}
         if ev:   result["sv_team_exit_velo"]  = round(ev, 1)
         if brl:  result["sv_team_barrel_pct"] = round(brl, 1)
-        if xwob: result["sv_team_xwoba"]      = round(xwob, 3)
         if ev95: result["sv_team_ev95"]        = round(ev95, 1)
 
-        if xwob and brl and ev:
-            xwob_s = max(0, min(10, (xwob - 0.280) / 0.010))
-            brl_s  = max(0, min(10, brl / 1.0))
-            ev_s   = max(0, min(10, (ev - 85.0) / 1.0))
+        # Lineup score from EV + barrel (higher = more dangerous lineup)
+        if ev and brl:
+            ev_s  = max(0, min(10, (ev - 85.0) / 1.0))
+            brl_s = max(0, min(10, brl / 1.0))
+            ev95_s = max(0, min(10, (ev95 - 30.0) / 3.0)) if ev95 else 5.0
             result["sv_lineup_score"] = round(
-                xwob_s*0.40 + brl_s*0.35 + ev_s*0.25, 1)
+                ev_s*0.40 + brl_s*0.40 + ev95_s*0.20, 1)
 
         return result
 
@@ -2630,9 +2599,9 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     if home_sv_pitch:
         print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | xERA={home_sv_pitch.get('sv_xera','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10")
     if away_sv_bat:
-        print(f"    {info['away_team']} lineup: EV={away_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={away_sv_bat.get('sv_team_barrel_pct','N/A')} | xwOBA={away_sv_bat.get('sv_team_xwoba','N/A')} | Score={away_sv_bat.get('sv_lineup_score','N/A')}/10")
+        print(f"    {info['away_team']} lineup: EV={away_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={away_sv_bat.get('sv_team_barrel_pct','N/A')} | EV95%={away_sv_bat.get('sv_team_ev95','N/A')} | Score={away_sv_bat.get('sv_lineup_score','N/A')}/10")
     if home_sv_bat:
-        print(f"    {info['home_team']} lineup: EV={home_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={home_sv_bat.get('sv_team_barrel_pct','N/A')} | xwOBA={home_sv_bat.get('sv_team_xwoba','N/A')} | Score={home_sv_bat.get('sv_lineup_score','N/A')}/10")
+        print(f"    {info['home_team']} lineup: EV={home_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={home_sv_bat.get('sv_team_barrel_pct','N/A')} | EV95%={home_sv_bat.get('sv_team_ev95','N/A')} | Score={home_sv_bat.get('sv_lineup_score','N/A')}/10")
 
     # ── NEW VARIABLES ─────────────────────────────────────────
     print("  🆕 Fetching new variables...")
