@@ -1159,23 +1159,18 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
         if r2.status_code == 200 and r2.content:
             rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
-            if rows2:
-                print(f"  🔍 Statcast all cols: {list(rows2[0].keys())}")
             for row in rows2:
                 if str(row.get("player_id","")).strip() == str(pitcher_id):
                     def sf2(k):
                         v=row.get(k,"").strip()
                         try: return float(v) if v else None
                         except: return None
-                    # barrel% = barrels / bip * 100
-                    barrels = sf2("barrels")
-                    bip     = sf2("bip") or sf2("batted_balls")
-                    if barrels and bip and bip > 0:
-                        result["sv_barrel_pct"] = round(barrels/bip*100, 1)
-                    ev = sf2("launch_speed_avg") or sf2("exit_velocity_avg") or sf2("avg_hit_speed")
-                    hh = sf2("hard_hit_percent") or sf2("hard_hit_rate")
-                    if ev: result["sv_exit_velo"] = round(ev, 1)
-                    if hh: result["sv_hard_hit"]  = round(hh, 1)
+                    barrel = sf2("brl_percent")
+                    ev     = sf2("avg_hit_speed")
+                    ev95   = sf2("ev95percent")
+                    if barrel: result["sv_barrel_pct"] = round(barrel, 1)
+                    if ev:     result["sv_exit_velo"]  = round(ev, 1)
+                    if ev95:   result["sv_ev95_pct"]   = round(ev95, 1)
                     break
 
         # Endpoint 3: Swing/miss data for whiff%
@@ -1204,17 +1199,16 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
         xwoba  = result.get("sv_xwoba")
         xera   = result.get("sv_xera")
         barrel = result.get("sv_barrel_pct")
-        whiff  = result.get("sv_whiff_pct")
+        ev95   = result.get("sv_ev95_pct")  # % of balls hit 95mph+ against
 
         if xwoba and xera:
-            # xERA-based quality (lower = better)
-            xera_score  = max(0, min(10, (5.00 - xera) / 0.30))
-            xwoba_score = max(0, min(10, (0.380 - xwoba) / 0.010))
+            xera_score   = max(0, min(10, (5.00 - xera) / 0.30))
+            xwoba_score  = max(0, min(10, (0.380 - xwoba) / 0.010))
             barrel_score = max(0, min(10, (12.0 - barrel) / 1.0)) if barrel else 5.0
-            whiff_score  = max(0, min(10, (whiff - 20.0) / 2.0))  if whiff  else 5.0
+            ev95_score   = max(0, min(10, (50.0 - ev95) / 4.0))   if ev95   else 5.0
             result["sv_quality_score"] = round(
-                (xera_score * 0.4 + xwoba_score * 0.3 +
-                 barrel_score * 0.15 + whiff_score * 0.15), 1)
+                xera_score*0.35 + xwoba_score*0.35 +
+                barrel_score*0.15 + ev95_score*0.15, 1)
 
         return result
 
@@ -2607,9 +2601,9 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     if not away_sv_pitch and not home_sv_pitch:
         print(f"  ⚠️  Savant: no pitcher data returned (API may be rate-limiting or down)")
     if away_sv_pitch:
-        print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Whiff%={away_sv_pitch.get('sv_whiff_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10")
+        print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | xERA={away_sv_pitch.get('sv_xera','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10")
     if home_sv_pitch:
-        print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Whiff%={home_sv_pitch.get('sv_whiff_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10")
+        print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | xERA={home_sv_pitch.get('sv_xera','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10")
     if away_sv_bat:
         print(f"    {info['away_team']} lineup: EV={away_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={away_sv_bat.get('sv_team_barrel_pct','N/A')} | xwOBA={away_sv_bat.get('sv_team_xwoba','N/A')} | Score={away_sv_bat.get('sv_lineup_score','N/A')}/10")
     if home_sv_bat:
