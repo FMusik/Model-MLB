@@ -1155,7 +1155,7 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
         r2 = requests.get(
             "https://baseballsavant.mlb.com/leaderboard/statcast",
             params={"type":"pitcher","year":season,"position":"","team":"",
-                    "min":50,"csv":"true"},
+                    "min":10,"csv":"true"},  # lowered from 50 to catch more pitchers
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
         if r2.status_code == 200 and r2.content:
             rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
@@ -1254,14 +1254,17 @@ def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
                     return round(sum(vals)/len(vals), 3)
             return None
 
-        # Use correct column names from expected_statistics endpoint
-        xwob = avg_field("est_woba","xwoba")
+        # Use correct column names — debug first row to find xwoba key
+        if reader:
+            xwoba_keys = [k for k in reader[0].keys() if 'woba' in k.lower() or 'est' in k.lower()]
+            # Use est_woba (expected woba) not regular woba
+            xwob = avg_field("est_woba", "xwoba", "expected_woba")
 
         # Get barrel/EV from statcast endpoint for batters
         r3 = requests.get(
             "https://baseballsavant.mlb.com/leaderboard/statcast",
             params={"type":"batter","year":season,"position":"","team":team_abbrev,
-                    "min":50,"csv":"true"},
+                    "min":10,"csv":"true"},
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
 
         ev = brl = ev95 = None
