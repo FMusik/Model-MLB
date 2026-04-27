@@ -1159,6 +1159,8 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
             timeout=20, headers={"User-Agent":"Mozilla/5.0"})
         if r2.status_code == 200 and r2.content:
             rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
+            if rows2:
+                print(f"  🔍 Statcast all cols: {list(rows2[0].keys())}")
             for row in rows2:
                 if str(row.get("player_id","")).strip() == str(pitcher_id):
                     def sf2(k):
