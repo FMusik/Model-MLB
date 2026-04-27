@@ -1124,65 +1124,73 @@ SAVANT_BASE = "https://baseballsavant.mlb.com/statcast_search/csv"
 
 def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
     """
-    Fetch pitcher Statcast data from Baseball Savant leaderboard.
-    Returns xwOBA, barrel%, whiff%, exit velo, quality score 0-10.
+    Fetch pitcher Statcast data from Baseball Savant.
+    Uses expected_statistics for xwOBA/xERA + arsenal for whiff/barrel.
     """
     try:
-        url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-        params = {
-            "type": "pitcher",
-            "year": season,
-            "position": "",
-            "team": "",
-            "min": "q",
-            "csv": "true",  # request CSV
-        }
-        r = requests.get(url, params=params, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
-            print(f"  ⚠️  Savant pitcher HTTP {r.status_code}")
-            return {}
-
-        # Parse CSV with utf-8-sig to handle BOM
         import csv, io
-        content = r.content.decode("utf-8-sig")
-        reader  = csv.DictReader(io.StringIO(content))
-        rows    = list(reader)
-        if not rows: return {}
 
-        # Debug — print all column names once
-        print(f"  🔍 Savant cols: {list(rows[0].keys())}")
+        result = {}
 
-        for row in rows:
-            pid = (row.get("player_id") or row.get("pitcher") or
-                   row.get("pitcher_id") or row.get("xMLBAMID","")).strip()
-            if pid == str(pitcher_id):
-                def sf(k):
-                    v = row.get(k,"").strip()
-                    try: return float(v) if v else None
-                    except: return None
+        # Endpoint 1: Expected stats (xwOBA, xERA)
+        r1 = requests.get(
+            "https://baseballsavant.mlb.com/leaderboard/expected_statistics",
+            params={"type":"pitcher","year":season,"min":"q","csv":"true"},
+            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+        if r1.status_code == 200:
+            rows = list(csv.DictReader(io.StringIO(r1.content.decode("utf-8-sig"))))
+            for row in rows:
+                if str(row.get("player_id","")).strip() == str(pitcher_id):
+                    def sf(k): 
+                        v=row.get(k,"").strip()
+                        try: return float(v) if v else None
+                        except: return None
+                    xwoba = sf("est_woba")
+                    xera  = sf("xera")
+                    if xwoba: result["sv_xwoba"] = round(xwoba, 3)
+                    if xera:  result["sv_xera"]  = round(xera, 2)
+                    break
 
-                xwoba  = sf("est_woba") or sf("xwoba")
-                barrel = sf("barrel_batted_rate") or sf("brl_percent")
-                whiff  = sf("whiff_percent")
-                ev     = sf("launch_speed_avg") or sf("exit_velocity_avg")
-                hard   = sf("hard_hit_percent")
+        # Endpoint 2: Pitch arsenal stats (whiff%, barrel%, hard hit%)
+        r2 = requests.get(
+            "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats",
+            params={"type":"pitcher","year":season,"min":50,"csv":"true"},
+            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+        if r2.status_code == 200:
+            rows2 = list(csv.DictReader(io.StringIO(r2.content.decode("utf-8-sig"))))
+            for row in rows2:
+                if str(row.get("pitcher_id","") or row.get("player_id","")).strip() == str(pitcher_id):
+                    def sf2(k):
+                        v=row.get(k,"").strip()
+                        try: return float(v) if v else None
+                        except: return None
+                    whiff  = sf2("whiff_percent") or sf2("whiff_pct") or sf2("whiff%")
+                    barrel = sf2("barrel_batted_rate") or sf2("brl_percent") or sf2("barrel%")
+                    hard   = sf2("hard_hit_percent") or sf2("hard_hit%")
+                    ev     = sf2("launch_speed_avg") or sf2("exit_velocity_avg")
+                    if whiff:  result["sv_whiff_pct"]  = round(whiff, 1)
+                    if barrel: result["sv_barrel_pct"] = round(barrel, 1)
+                    if hard:   result["sv_hard_hit"]   = round(hard, 1)
+                    if ev:     result["sv_exit_velo"]  = round(ev, 1)
+                    break
 
-                result = {}
-                if xwoba:  result["sv_xwoba"]      = round(xwoba, 3)
-                if barrel: result["sv_barrel_pct"] = round(barrel, 1)
-                if whiff:  result["sv_whiff_pct"]  = round(whiff, 1)
-                if ev:     result["sv_exit_velo"]  = round(ev, 1)
-                if hard:   result["sv_hard_hit"]   = round(hard, 1)
+        # Quality score using what we have
+        xwoba  = result.get("sv_xwoba")
+        xera   = result.get("sv_xera")
+        barrel = result.get("sv_barrel_pct")
+        whiff  = result.get("sv_whiff_pct")
 
-                if result.get("sv_xwoba") and result.get("sv_barrel_pct") and result.get("sv_whiff_pct"):
-                    xs = max(0, min(10, (0.380 - result["sv_xwoba"]) / 0.010))
-                    bs = max(0, min(10, (12.0 - result["sv_barrel_pct"]) / 1.0))
-                    ws = max(0, min(10, (result["sv_whiff_pct"] - 20.0) / 2.0))
-                    result["sv_quality_score"] = round((xs + bs + ws) / 3, 1)
-                return result
+        if xwoba and xera:
+            # xERA-based quality (lower = better)
+            xera_score  = max(0, min(10, (5.00 - xera) / 0.30))
+            xwoba_score = max(0, min(10, (0.380 - xwoba) / 0.010))
+            barrel_score = max(0, min(10, (12.0 - barrel) / 1.0)) if barrel else 5.0
+            whiff_score  = max(0, min(10, (whiff - 20.0) / 2.0))  if whiff  else 5.0
+            result["sv_quality_score"] = round(
+                (xera_score * 0.4 + xwoba_score * 0.3 +
+                 barrel_score * 0.15 + whiff_score * 0.15), 1)
 
-        return {}  # pitcher not found (not enough IP yet)
+        return result
 
     except Exception as e:
         print(f"  ⚠️  Savant pitcher {pitcher_id}: {type(e).__name__}: {e}")
@@ -1214,19 +1222,22 @@ def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
         reader  = list(csv.DictReader(io.StringIO(content)))
         if not reader: return {}
 
-        def avg_field(key):
-            vals = []
-            for row in reader:
-                v = row.get(key,"").strip()
-                try:
-                    if v: vals.append(float(v))
-                except: pass
-            return round(sum(vals)/len(vals), 3) if vals else None
+        def avg_field(*keys):
+            for key in keys:
+                vals = []
+                for row in reader:
+                    v = row.get(key,"").strip()
+                    try:
+                        if v: vals.append(float(v))
+                    except: pass
+                if vals:
+                    return round(sum(vals)/len(vals), 3)
+            return None
 
-        ev   = avg_field("launch_speed_avg") or avg_field("exit_velocity_avg")
-        brl  = avg_field("barrel_batted_rate") or avg_field("brl_percent")
-        xwob = avg_field("est_woba") or avg_field("xwoba")
-        hh   = avg_field("hard_hit_percent")
+        ev   = avg_field("launch_speed_avg","exit_velocity_avg")
+        brl  = avg_field("barrel_batted_rate","brl_percent","barrel%")
+        xwob = avg_field("est_woba","xwoba")
+        hh   = avg_field("hard_hit_percent","hard_hit%")
 
         result = {}
         if ev:   result["sv_team_exit_velo"]  = round(ev, 1)
