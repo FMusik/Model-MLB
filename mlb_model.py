@@ -1197,20 +1197,6 @@ def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
                         whiff = sf3("whiff_percent") or sf3("whiff_pct") or sf3("whiff_rate")
                         if whiff: result["sv_whiff_pct"] = round(whiff, 1)
                         break
-                if str(row.get("pitcher_id","") or row.get("player_id","")).strip() == str(pitcher_id):
-                    def sf2(k):
-                        v=row.get(k,"").strip()
-                        try: return float(v) if v else None
-                        except: return None
-                    whiff  = sf2("whiff_percent") or sf2("whiff_pct") or sf2("whiff%")
-                    barrel = sf2("barrel_batted_rate") or sf2("brl_percent") or sf2("barrel%")
-                    hard   = sf2("hard_hit_percent") or sf2("hard_hit%")
-                    ev     = sf2("launch_speed_avg") or sf2("exit_velocity_avg")
-                    if whiff:  result["sv_whiff_pct"]  = round(whiff, 1)
-                    if barrel: result["sv_barrel_pct"] = round(barrel, 1)
-                    if hard:   result["sv_hard_hit"]   = round(hard, 1)
-                    if ev:     result["sv_exit_velo"]  = round(ev, 1)
-                    break
 
         # Quality score using what we have
         xwoba  = result.get("sv_xwoba")
