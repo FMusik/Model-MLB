@@ -1254,22 +1254,45 @@ def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
                     return round(sum(vals)/len(vals), 3)
             return None
 
-        ev   = avg_field("launch_speed_avg","exit_velocity_avg")
-        brl  = avg_field("barrel_batted_rate","brl_percent","barrel%")
+        # Use correct column names from expected_statistics endpoint
         xwob = avg_field("est_woba","xwoba")
-        hh   = avg_field("hard_hit_percent","hard_hit%")
+
+        # Get barrel/EV from statcast endpoint for batters
+        r3 = requests.get(
+            "https://baseballsavant.mlb.com/leaderboard/statcast",
+            params={"type":"batter","year":season,"position":"","team":team_abbrev,
+                    "min":50,"csv":"true"},
+            timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+
+        ev = brl = ev95 = None
+        if r3.status_code == 200 and r3.content:
+            rows3 = list(csv.DictReader(io.StringIO(r3.content.decode("utf-8-sig"))))
+            def avg3(*keys):
+                for key in keys:
+                    vals = []
+                    for row in rows3:
+                        v = row.get(key,"").strip()
+                        try:
+                            if v: vals.append(float(v))
+                        except: pass
+                    if vals: return round(sum(vals)/len(vals),3)
+                return None
+            ev   = avg3("avg_hit_speed")
+            brl  = avg3("brl_percent")
+            ev95 = avg3("ev95percent")
 
         result = {}
         if ev:   result["sv_team_exit_velo"]  = round(ev, 1)
         if brl:  result["sv_team_barrel_pct"] = round(brl, 1)
         if xwob: result["sv_team_xwoba"]      = round(xwob, 3)
-        if hh:   result["sv_team_hard_hit"]   = round(hh, 1)
+        if ev95: result["sv_team_ev95"]        = round(ev95, 1)
 
-        if ev and brl and xwob:
-            ev_s   = max(0, min(10, (ev - 85.0) / 1.0))
-            brl_s  = max(0, min(10, brl / 1.0))
+        if xwob and brl and ev:
             xwob_s = max(0, min(10, (xwob - 0.280) / 0.010))
-            result["sv_lineup_score"] = round((ev_s + brl_s + xwob_s) / 3, 1)
+            brl_s  = max(0, min(10, brl / 1.0))
+            ev_s   = max(0, min(10, (ev - 85.0) / 1.0))
+            result["sv_lineup_score"] = round(
+                xwob_s*0.40 + brl_s*0.35 + ev_s*0.25, 1)
 
         return result
 
