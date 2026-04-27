@@ -1124,184 +1124,125 @@ SAVANT_BASE = "https://baseballsavant.mlb.com/statcast_search/csv"
 
 def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
     """
-    Fetch pitcher Statcast data from Baseball Savant.
-    Returns xFIP proxy, barrel rate, whiff rate, hard hit%, avg exit velo.
+    Fetch pitcher Statcast data from Baseball Savant expected stats leaderboard.
+    Uses JSON endpoint — more reliable than CSV search.
     """
     try:
+        url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
         params = {
-            "hfPT":  "",           # pitch type — all
-            "hfAB":  "",           # at bat result — all
-            "hfGT":  "R|",         # regular season
-            "hfPR":  "",
-            "hfZ":   "",
-            "hfStadium": "",
-            "hfBBL": "",
-            "hfNewZones": "",
-            "hfPull": "",
-            "hfC":   "",
-            "hfSea": f"{season}|",
-            "hfSit": "",
-            "player_type": "pitcher",
-            "hfOuts": "",
-            "hfOpponent": "",
-            "pitcher_throws": "",
-            "batter_stands": "",
-            "hfSA": "",
-            "game_date_gt": f"{season}-03-01",
-            "game_date_lt": f"{season}-11-01",
-            "pitchers_lookup[]": pitcher_id,
-            "team": "",
+            "type":     "pitcher",
+            "year":     season,
             "position": "",
-            "hfRO": "",
-            "home_road": "",
-            "hfFlag": "",
-            "metric_1": "",
-            "group_by": "name",
-            "min_pitches": 0,
-            "min_results": 0,
-            "min_pas": 0,
-            "sort_col": "pitches",
-            "player_event_sort": "api_p_release_speed",
-            "sort_order": "desc",
-            "chk_stats_pa": "on",
-            "chk_stats_abs": "on",
-            "chk_stats_bip": "on",
-            "chk_stats_hits": "on",
-            "chk_stats_so": "on",
-            "chk_stats_bb": "on",
-            "chk_stats_xba": "on",
-            "chk_stats_xslg": "on",
-            "chk_stats_xwoba": "on",
-            "chk_stats_xobp": "on",
-            "chk_stats_exit_velocity_avg": "on",
-            "chk_stats_launch_angle_avg": "on",
-            "chk_stats_barrel_batted_rate": "on",
-            "chk_stats_hard_hit_percent": "on",
-            "chk_stats_whiff_percent": "on",
-            "type": "details",
+            "team":     "",
+            "min":      "q",  # qualified pitchers
+            "csv":      "false",
         }
-        r = requests.get(SAVANT_BASE, params=params, timeout=20)
-        if r.status_code != 200 or not r.text.strip():
+        r = requests.get(url, params=params, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Accept": "application/json"})
+        if r.status_code != 200:
+            print(f"  ⚠️  Savant pitcher HTTP {r.status_code}")
             return {}
 
-        lines = r.text.strip().split("\n")
-        if len(lines) < 2: return {}
+        data = r.json()
+        players = data if isinstance(data, list) else \
+                  data.get("data", data.get("players", []))
 
-        # Parse CSV header + first data row
-        headers = lines[0].split(",")
-        vals    = lines[1].split(",") if len(lines) > 1 else []
-        if not vals: return {}
+        for p in players:
+            pid = (p.get("player_id") or p.get("pitcher") or
+                   p.get("pitcher_id") or p.get("xMLBAMID",""))
+            if str(pid) == str(pitcher_id):
+                result = {}
+                def sf(key):
+                    v = p.get(key)
+                    try: return float(v) if v is not None else None
+                    except: return None
 
-        def get_col(name, default=None):
-            try:
-                idx = next(i for i, h in enumerate(headers) if name.lower() in h.lower())
-                v = vals[idx].strip().strip('"')
-                return float(v) if v and v != "null" else default
-            except: return default
+                xwoba  = sf("est_woba") or sf("xwoba") or sf("xwOBA")
+                barrel = sf("barrel_batted_rate") or sf("brl_percent") or sf("barrel_pct")
+                whiff  = sf("whiff_percent") or sf("whiff_pct")
+                ev     = sf("launch_speed_avg") or sf("exit_velocity_avg")
+                hard   = sf("hard_hit_percent")
 
-        xwoba      = get_col("xwoba")
-        barrel_pct = get_col("barrel_batted_rate")
-        hard_hit   = get_col("hard_hit_percent")
-        whiff_pct  = get_col("whiff_percent")
-        exit_velo  = get_col("exit_velocity_avg")
-        xba        = get_col("xba")
-        xslg       = get_col("xslg")
+                if xwoba:  result["sv_xwoba"]      = round(xwoba, 3)
+                if barrel: result["sv_barrel_pct"] = round(barrel, 1)
+                if whiff:  result["sv_whiff_pct"]  = round(whiff, 1)
+                if ev:     result["sv_exit_velo"]  = round(ev, 1)
+                if hard:   result["sv_hard_hit"]   = round(hard, 1)
 
-        result = {}
-        if xwoba      is not None: result["sv_xwoba"]      = round(xwoba, 3)
-        if barrel_pct is not None: result["sv_barrel_pct"] = round(barrel_pct, 1)
-        if hard_hit   is not None: result["sv_hard_hit"]   = round(hard_hit, 1)
-        if whiff_pct  is not None: result["sv_whiff_pct"]  = round(whiff_pct, 1)
-        if exit_velo  is not None: result["sv_exit_velo"]  = round(exit_velo, 1)
-        if xba        is not None: result["sv_xba"]        = round(xba, 3)
-        if xslg       is not None: result["sv_xslg"]       = round(xslg, 3)
+                if result.get("sv_xwoba") and result.get("sv_barrel_pct") and result.get("sv_whiff_pct"):
+                    xs = max(0, min(10, (0.380 - result["sv_xwoba"]) / 0.010))
+                    bs = max(0, min(10, (12.0 - result["sv_barrel_pct"]) / 1.0))
+                    ws = max(0, min(10, (result["sv_whiff_pct"] - 20.0) / 2.0))
+                    result["sv_quality_score"] = round((xs + bs + ws) / 3, 1)
+                return result
 
-        # Quality score: lower xwoba + lower barrel + higher whiff = better pitcher
-        if xwoba is not None and barrel_pct is not None and whiff_pct is not None:
-            # Normalize to 0-10 scale (10 = elite)
-            xwoba_score  = max(0, min(10, (0.380 - xwoba) / 0.010))
-            barrel_score = max(0, min(10, (12.0 - barrel_pct) / 1.0))
-            whiff_score  = max(0, min(10, (whiff_pct - 20.0) / 2.0))
-            result["sv_quality_score"] = round((xwoba_score + barrel_score + whiff_score) / 3, 1)
-
-        return result
+        # Not found in leaderboard (may not have enough IP)
+        return {}
 
     except Exception as e:
+        print(f"  ⚠️  Savant pitcher {pitcher_id}: {type(e).__name__}: {e}")
         return {}
 
 
 def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
     """
-    Fetch team batting Statcast data from Baseball Savant.
-    Returns avg exit velo, barrel%, hard hit%, xwOBA for the team.
+    Fetch team batting Statcast data from Baseball Savant leaderboard.
+    Uses JSON endpoint — more reliable than CSV search.
     """
     try:
+        url = "https://baseballsavant.mlb.com/leaderboard/expected_statistics"
         params = {
-            "hfGT":  "R|",
-            "hfSea": f"{season}|",
-            "game_date_gt": f"{season}-03-01",
-            "game_date_lt": f"{season}-11-01",
-            "player_type": "batter",
-            "team": team_abbrev,
-            "group_by": "name",
-            "min_pas": 50,
-            "chk_stats_exit_velocity_avg": "on",
-            "chk_stats_barrel_batted_rate": "on",
-            "chk_stats_hard_hit_percent": "on",
-            "chk_stats_xwoba": "on",
-            "chk_stats_whiff_percent": "on",
-            "type": "details",
+            "type":     "batter",
+            "year":     season,
+            "position": "",
+            "team":     team_abbrev,
+            "min":      50,
+            "csv":      "false",
         }
-        r = requests.get(SAVANT_BASE, params=params, timeout=20)
-        if r.status_code != 200 or not r.text.strip():
+        r = requests.get(url, params=params, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Accept": "application/json"})
+        if r.status_code != 200:
             return {}
 
-        lines = r.text.strip().split("\n")
-        if len(lines) < 2: return {}
+        data = r.json()
+        players = data if isinstance(data, list) else \
+                  data.get("data", data.get("players", []))
 
-        headers = lines[0].split(",")
-        # Average across all batters
-        data_rows = []
-        for line in lines[1:]:
-            vals = line.split(",")
-            if len(vals) < len(headers): continue
-            data_rows.append(vals)
+        if not players: return {}
 
-        if not data_rows: return {}
+        # Average across all qualifying batters
+        def avg_field(key):
+            vals = []
+            for p in players:
+                v = p.get(key)
+                try:
+                    if v is not None: vals.append(float(v))
+                except: pass
+            return round(sum(vals)/len(vals), 3) if vals else None
 
-        def avg_col(name):
-            try:
-                idx = next(i for i, h in enumerate(headers) if name.lower() in h.lower())
-                vals = []
-                for row in data_rows:
-                    try:
-                        v = row[idx].strip().strip('"')
-                        if v and v != "null": vals.append(float(v))
-                    except: pass
-                return round(sum(vals)/len(vals), 3) if vals else None
-            except: return None
+        ev   = avg_field("launch_speed_avg") or avg_field("exit_velocity_avg")
+        brl  = avg_field("barrel_batted_rate") or avg_field("brl_percent")
+        xwob = avg_field("est_woba") or avg_field("xwoba")
+        hh   = avg_field("hard_hit_percent")
 
         result = {}
-        ev   = avg_col("exit_velocity_avg")
-        brl  = avg_col("barrel_batted_rate")
-        hh   = avg_col("hard_hit_percent")
-        xwob = avg_col("xwoba")
+        if ev:   result["sv_team_exit_velo"]  = round(ev, 1)
+        if brl:  result["sv_team_barrel_pct"] = round(brl, 1)
+        if xwob: result["sv_team_xwoba"]      = round(xwob, 3)
+        if hh:   result["sv_team_hard_hit"]   = round(hh, 1)
 
-        if ev   is not None: result["sv_team_exit_velo"]  = round(ev, 1)
-        if brl  is not None: result["sv_team_barrel_pct"] = round(brl, 1)
-        if hh   is not None: result["sv_team_hard_hit"]   = round(hh, 1)
-        if xwob is not None: result["sv_team_xwoba"]      = round(xwob, 3)
-
-        # Offense quality: higher exit velo + barrel + xwoba = better lineup
-        if ev is not None and brl is not None and xwob is not None:
-            ev_score  = max(0, min(10, (ev - 85.0) / 1.0))
-            brl_score = max(0, min(10, brl / 1.0))
-            xwob_score = max(0, min(10, (xwob - 0.280) / 0.010))
-            result["sv_lineup_score"] = round((ev_score + brl_score + xwob_score) / 3, 1)
+        if ev and brl and xwob:
+            ev_s   = max(0, min(10, (ev - 85.0) / 1.0))
+            brl_s  = max(0, min(10, brl / 1.0))
+            xwob_s = max(0, min(10, (xwob - 0.280) / 0.010))
+            result["sv_lineup_score"] = round((ev_s + brl_s + xwob_s) / 3, 1)
 
         return result
 
     except Exception as e:
+        print(f"  ⚠️  Savant team {team_abbrev}: {type(e).__name__}: {e}")
         return {}
 
 
@@ -2625,6 +2566,8 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     away_sv_bat   = get_savant_batter_team(away_abbrev) if away_abbrev else {}
     home_sv_bat   = get_savant_batter_team(home_abbrev) if home_abbrev else {}
 
+    if not away_sv_pitch and not home_sv_pitch:
+        print(f"  ⚠️  Savant: no pitcher data returned (API may be rate-limiting or down)")
     if away_sv_pitch:
         print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Whiff%={away_sv_pitch.get('sv_whiff_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10")
     if home_sv_pitch:
