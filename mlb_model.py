@@ -1120,6 +1120,207 @@ def get_pitcher_stats(pitcher_id):
             "games_started":gs26,"wins":s26.get("wins",0),"losses":s26.get("losses",0),
             "data_label":label,"era_2026":s26.get("era","N/A"),"gs_2026":gs26}
 
+SAVANT_BASE = "https://baseballsavant.mlb.com/statcast_search/csv"
+
+def get_savant_pitcher(pitcher_id: int, season: int = SEASON) -> dict:
+    """
+    Fetch pitcher Statcast data from Baseball Savant.
+    Returns xFIP proxy, barrel rate, whiff rate, hard hit%, avg exit velo.
+    """
+    try:
+        params = {
+            "hfPT":  "",           # pitch type — all
+            "hfAB":  "",           # at bat result — all
+            "hfGT":  "R|",         # regular season
+            "hfPR":  "",
+            "hfZ":   "",
+            "hfStadium": "",
+            "hfBBL": "",
+            "hfNewZones": "",
+            "hfPull": "",
+            "hfC":   "",
+            "hfSea": f"{season}|",
+            "hfSit": "",
+            "player_type": "pitcher",
+            "hfOuts": "",
+            "hfOpponent": "",
+            "pitcher_throws": "",
+            "batter_stands": "",
+            "hfSA": "",
+            "game_date_gt": f"{season}-03-01",
+            "game_date_lt": f"{season}-11-01",
+            "pitchers_lookup[]": pitcher_id,
+            "team": "",
+            "position": "",
+            "hfRO": "",
+            "home_road": "",
+            "hfFlag": "",
+            "metric_1": "",
+            "group_by": "name",
+            "min_pitches": 0,
+            "min_results": 0,
+            "min_pas": 0,
+            "sort_col": "pitches",
+            "player_event_sort": "api_p_release_speed",
+            "sort_order": "desc",
+            "chk_stats_pa": "on",
+            "chk_stats_abs": "on",
+            "chk_stats_bip": "on",
+            "chk_stats_hits": "on",
+            "chk_stats_so": "on",
+            "chk_stats_bb": "on",
+            "chk_stats_xba": "on",
+            "chk_stats_xslg": "on",
+            "chk_stats_xwoba": "on",
+            "chk_stats_xobp": "on",
+            "chk_stats_exit_velocity_avg": "on",
+            "chk_stats_launch_angle_avg": "on",
+            "chk_stats_barrel_batted_rate": "on",
+            "chk_stats_hard_hit_percent": "on",
+            "chk_stats_whiff_percent": "on",
+            "type": "details",
+        }
+        r = requests.get(SAVANT_BASE, params=params, timeout=20)
+        if r.status_code != 200 or not r.text.strip():
+            return {}
+
+        lines = r.text.strip().split("\n")
+        if len(lines) < 2: return {}
+
+        # Parse CSV header + first data row
+        headers = lines[0].split(",")
+        vals    = lines[1].split(",") if len(lines) > 1 else []
+        if not vals: return {}
+
+        def get_col(name, default=None):
+            try:
+                idx = next(i for i, h in enumerate(headers) if name.lower() in h.lower())
+                v = vals[idx].strip().strip('"')
+                return float(v) if v and v != "null" else default
+            except: return default
+
+        xwoba      = get_col("xwoba")
+        barrel_pct = get_col("barrel_batted_rate")
+        hard_hit   = get_col("hard_hit_percent")
+        whiff_pct  = get_col("whiff_percent")
+        exit_velo  = get_col("exit_velocity_avg")
+        xba        = get_col("xba")
+        xslg       = get_col("xslg")
+
+        result = {}
+        if xwoba      is not None: result["sv_xwoba"]      = round(xwoba, 3)
+        if barrel_pct is not None: result["sv_barrel_pct"] = round(barrel_pct, 1)
+        if hard_hit   is not None: result["sv_hard_hit"]   = round(hard_hit, 1)
+        if whiff_pct  is not None: result["sv_whiff_pct"]  = round(whiff_pct, 1)
+        if exit_velo  is not None: result["sv_exit_velo"]  = round(exit_velo, 1)
+        if xba        is not None: result["sv_xba"]        = round(xba, 3)
+        if xslg       is not None: result["sv_xslg"]       = round(xslg, 3)
+
+        # Quality score: lower xwoba + lower barrel + higher whiff = better pitcher
+        if xwoba is not None and barrel_pct is not None and whiff_pct is not None:
+            # Normalize to 0-10 scale (10 = elite)
+            xwoba_score  = max(0, min(10, (0.380 - xwoba) / 0.010))
+            barrel_score = max(0, min(10, (12.0 - barrel_pct) / 1.0))
+            whiff_score  = max(0, min(10, (whiff_pct - 20.0) / 2.0))
+            result["sv_quality_score"] = round((xwoba_score + barrel_score + whiff_score) / 3, 1)
+
+        return result
+
+    except Exception as e:
+        return {}
+
+
+def get_savant_batter_team(team_abbrev: str, season: int = SEASON) -> dict:
+    """
+    Fetch team batting Statcast data from Baseball Savant.
+    Returns avg exit velo, barrel%, hard hit%, xwOBA for the team.
+    """
+    try:
+        params = {
+            "hfGT":  "R|",
+            "hfSea": f"{season}|",
+            "game_date_gt": f"{season}-03-01",
+            "game_date_lt": f"{season}-11-01",
+            "player_type": "batter",
+            "team": team_abbrev,
+            "group_by": "name",
+            "min_pas": 50,
+            "chk_stats_exit_velocity_avg": "on",
+            "chk_stats_barrel_batted_rate": "on",
+            "chk_stats_hard_hit_percent": "on",
+            "chk_stats_xwoba": "on",
+            "chk_stats_whiff_percent": "on",
+            "type": "details",
+        }
+        r = requests.get(SAVANT_BASE, params=params, timeout=20)
+        if r.status_code != 200 or not r.text.strip():
+            return {}
+
+        lines = r.text.strip().split("\n")
+        if len(lines) < 2: return {}
+
+        headers = lines[0].split(",")
+        # Average across all batters
+        data_rows = []
+        for line in lines[1:]:
+            vals = line.split(",")
+            if len(vals) < len(headers): continue
+            data_rows.append(vals)
+
+        if not data_rows: return {}
+
+        def avg_col(name):
+            try:
+                idx = next(i for i, h in enumerate(headers) if name.lower() in h.lower())
+                vals = []
+                for row in data_rows:
+                    try:
+                        v = row[idx].strip().strip('"')
+                        if v and v != "null": vals.append(float(v))
+                    except: pass
+                return round(sum(vals)/len(vals), 3) if vals else None
+            except: return None
+
+        result = {}
+        ev   = avg_col("exit_velocity_avg")
+        brl  = avg_col("barrel_batted_rate")
+        hh   = avg_col("hard_hit_percent")
+        xwob = avg_col("xwoba")
+
+        if ev   is not None: result["sv_team_exit_velo"]  = round(ev, 1)
+        if brl  is not None: result["sv_team_barrel_pct"] = round(brl, 1)
+        if hh   is not None: result["sv_team_hard_hit"]   = round(hh, 1)
+        if xwob is not None: result["sv_team_xwoba"]      = round(xwob, 3)
+
+        # Offense quality: higher exit velo + barrel + xwoba = better lineup
+        if ev is not None and brl is not None and xwob is not None:
+            ev_score  = max(0, min(10, (ev - 85.0) / 1.0))
+            brl_score = max(0, min(10, brl / 1.0))
+            xwob_score = max(0, min(10, (xwob - 0.280) / 0.010))
+            result["sv_lineup_score"] = round((ev_score + brl_score + xwob_score) / 3, 1)
+
+        return result
+
+    except Exception as e:
+        return {}
+
+
+# MLB team abbreviation map for Savant
+TEAM_ABBREV_MAP = {
+    "New York Yankees": "NYY", "Boston Red Sox": "BOS", "Toronto Blue Jays": "TOR",
+    "Tampa Bay Rays": "TB", "Baltimore Orioles": "BAL",
+    "Chicago White Sox": "CWS", "Cleveland Guardians": "CLE", "Detroit Tigers": "DET",
+    "Kansas City Royals": "KC", "Minnesota Twins": "MIN",
+    "Houston Astros": "HOU", "Los Angeles Angels": "LAA", "Oakland Athletics": "OAK",
+    "Seattle Mariners": "SEA", "Texas Rangers": "TEX", "Athletics": "OAK",
+    "Atlanta Braves": "ATL", "Miami Marlins": "MIA", "New York Mets": "NYM",
+    "Philadelphia Phillies": "PHI", "Washington Nationals": "WSH",
+    "Chicago Cubs": "CHC", "Cincinnati Reds": "CIN", "Milwaukee Brewers": "MIL",
+    "Pittsburgh Pirates": "PIT", "St. Louis Cardinals": "STL",
+    "Arizona Diamondbacks": "ARI", "Colorado Rockies": "COL",
+    "Los Angeles Dodgers": "LAD", "San Diego Padres": "SD", "San Francisco Giants": "SF",
+}
+
 def _calc_fip(s):
     try:
         hr=float(s.get("homeRuns",0) or 0); bb=float(s.get("baseOnBalls",0) or 0)
@@ -2044,7 +2245,8 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
                  bp_blended=False, series_game_num=1,
                  # Faroed-style edge inputs
                  elo_gap=0.0, l10_edge=0.0, rdiff_edge=0.0,
-                 streak_edge=0.0, support_score=0.0) -> tuple:
+                 streak_edge=0.0, support_score=0.0,
+                 savant_edge=0.0) -> tuple:
     """
     Confidence % system (0-100%) replacing old label system.
 
@@ -2232,6 +2434,12 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     elif support_score < -0.15: conf -= 3.0   # home team has clear edge
     elif support_score < -0.05: conf -= 1.5
 
+    # 23. SAVANT EDGE (pitcher Statcast quality vs opposing lineup)
+    if savant_edge > 0.3:     conf += 3.0   # elite pitcher vs weak lineup
+    elif savant_edge > 0.15:  conf += 1.5
+    elif savant_edge < -0.3:  conf -= 3.0   # weak pitcher vs elite lineup
+    elif savant_edge < -0.15: conf -= 1.5
+
     # ── CAP AND CONVERT ───────────────────────────────────────
     conf = round(max(35.0, min(85.0, conf)), 1)
 
@@ -2407,6 +2615,24 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
 
     if away_pf: print(f"    {info['away_pitcher']}: {away_pf.get('recent_form_score','?')} | ERA: {away_pf.get('recent_era','?')} | IP: {away_pf.get('recent_avg_ip','?')}")
     if home_pf: print(f"    {info['home_pitcher']}: {home_pf.get('recent_form_score','?')} | ERA: {home_pf.get('recent_era','?')} | IP: {home_pf.get('recent_avg_ip','?')}")
+
+    # ── BASEBALL SAVANT (Statcast) ─────────────────────────────
+    print("  ⚡ Fetching Savant data...")
+    away_sv_pitch = get_savant_pitcher(info["away_pitcher_id"])
+    home_sv_pitch = get_savant_pitcher(info["home_pitcher_id"])
+    away_abbrev   = TEAM_ABBREV_MAP.get(info["away_team"],"")
+    home_abbrev   = TEAM_ABBREV_MAP.get(info["home_team"],"")
+    away_sv_bat   = get_savant_batter_team(away_abbrev) if away_abbrev else {}
+    home_sv_bat   = get_savant_batter_team(home_abbrev) if home_abbrev else {}
+
+    if away_sv_pitch:
+        print(f"    {info['away_pitcher']} Savant: xwOBA={away_sv_pitch.get('sv_xwoba','N/A')} | Barrel%={away_sv_pitch.get('sv_barrel_pct','N/A')} | Whiff%={away_sv_pitch.get('sv_whiff_pct','N/A')} | Quality={away_sv_pitch.get('sv_quality_score','N/A')}/10")
+    if home_sv_pitch:
+        print(f"    {info['home_pitcher']} Savant: xwOBA={home_sv_pitch.get('sv_xwoba','N/A')} | Barrel%={home_sv_pitch.get('sv_barrel_pct','N/A')} | Whiff%={home_sv_pitch.get('sv_whiff_pct','N/A')} | Quality={home_sv_pitch.get('sv_quality_score','N/A')}/10")
+    if away_sv_bat:
+        print(f"    {info['away_team']} lineup: EV={away_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={away_sv_bat.get('sv_team_barrel_pct','N/A')} | xwOBA={away_sv_bat.get('sv_team_xwoba','N/A')} | Score={away_sv_bat.get('sv_lineup_score','N/A')}/10")
+    if home_sv_bat:
+        print(f"    {info['home_team']} lineup: EV={home_sv_bat.get('sv_team_exit_velo','N/A')} | Barrel%={home_sv_bat.get('sv_team_barrel_pct','N/A')} | xwOBA={home_sv_bat.get('sv_team_xwoba','N/A')} | Score={home_sv_bat.get('sv_lineup_score','N/A')}/10")
 
     # ── NEW VARIABLES ─────────────────────────────────────────
     print("  🆕 Fetching new variables...")
@@ -2664,6 +2890,15 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
     home_streak_val   = home_streak.get("streak", 0) if home_streak else 0
     support_score_val = support.get("support_score", 0) if support else 0
 
+    # Savant quality scores for confidence adjustment
+    away_sv_quality  = away_sv_pitch.get("sv_quality_score", 5.0)  # 0-10, higher = better pitcher
+    home_sv_quality  = home_sv_pitch.get("sv_quality_score", 5.0)
+    away_sv_lineup   = away_sv_bat.get("sv_lineup_score", 5.0)      # 0-10, higher = better lineup
+    home_sv_lineup   = home_sv_bat.get("sv_lineup_score", 5.0)
+    # Net Savant edge: good pitcher vs weak lineup = positive for pitcher's team
+    away_sv_edge = round((away_sv_quality - home_sv_lineup) / 10.0, 3)  # away pitcher vs home lineup
+    home_sv_edge = round((home_sv_quality - away_sv_lineup) / 10.0, 3)  # home pitcher vs away lineup
+
     # Detect reverse line movement
     # Public betting one side but line moves the other = sharp action
     def detect_reverse_line_move(bet_type, snap, curr, game_k):
@@ -2697,6 +2932,8 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         l10 = (away_l10_wp - home_l10_wp) if away_side else (home_l10_wp - away_l10_wp)
         rd  = (away_rdiff_pg - home_rdiff_pg)/5.0 if away_side else (home_rdiff_pg - away_rdiff_pg)/5.0
         sk  = (away_streak_val - home_streak_val)/10.0 if away_side else (home_streak_val - away_streak_val)/10.0
+        # Edge direction for savant — away_sv_edge means away pitcher vs home lineup
+        sv = away_sv_edge if away_side else home_sv_edge
         return score_signal(
             prob, odds, sc, fd, ua, la,
             bet_type=bet_type, line_value=line_value,
@@ -2712,6 +2949,7 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
             elo_gap=eg, l10_edge=l10,
             rdiff_edge=rd, streak_edge=sk,
             support_score=sup,
+            savant_edge=sv,
         )
 
     if market.get("away_ml"):
@@ -2875,6 +3113,19 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
         "home_streak":   home_streak.get("streak_label","N/A") if home_streak else "N/A",
         "support_score": support.get("support_score","N/A") if support else "N/A",
         "support_label": support.get("support_label","N/A") if support else "N/A",
+        # Savant data
+        "away_sv_xwoba":    away_sv_pitch.get("sv_xwoba","N/A"),
+        "away_sv_barrel":   away_sv_pitch.get("sv_barrel_pct","N/A"),
+        "away_sv_whiff":    away_sv_pitch.get("sv_whiff_pct","N/A"),
+        "away_sv_quality":  away_sv_pitch.get("sv_quality_score","N/A"),
+        "home_sv_xwoba":    home_sv_pitch.get("sv_xwoba","N/A"),
+        "home_sv_barrel":   home_sv_pitch.get("sv_barrel_pct","N/A"),
+        "home_sv_whiff":    home_sv_pitch.get("sv_whiff_pct","N/A"),
+        "home_sv_quality":  home_sv_pitch.get("sv_quality_score","N/A"),
+        "away_sv_lineup":   away_sv_bat.get("sv_lineup_score","N/A"),
+        "home_sv_lineup":   home_sv_bat.get("sv_lineup_score","N/A"),
+        "away_sv_ev":       away_sv_bat.get("sv_team_exit_velo","N/A"),
+        "home_sv_ev":       home_sv_bat.get("sv_team_exit_velo","N/A"),
         "park_factor":park_factor,"weather_factor":weather_factor,
         "away_lineup":", ".join(away_lineup) if away_lineup else "Not posted",
         "home_lineup":", ".join(home_lineup) if home_lineup else "Not posted",
@@ -3059,6 +3310,9 @@ HEADERS=[
     "Away Elo","Home Elo","Elo Gap","Away L10","Home L10",
     "Away RDiff/G","Home RDiff/G","Away Streak","Home Streak",
     "Support Score","Support Label",
+    "Away SP xwOBA","Away SP Barrel%","Away SP Whiff%","Away SP Quality",
+    "Home SP xwOBA","Home SP Barrel%","Home SP Whiff%","Home SP Quality",
+    "Away Lineup Score","Home Lineup Score","Away Exit Velo","Home Exit Velo",
     "Away ML","Home ML","Total Line","Over Odds","Under Odds","YRFI Odds","NRFI Odds",
     "Away ML Edge%","Away ML Score","Away ML Signal",
     "Home ML Edge%","Home ML Score","Home ML Signal",
@@ -3120,6 +3374,9 @@ def push_to_sheets(sheet,results):
             r.get("away_rdiff",""),r.get("home_rdiff",""),
             r.get("away_streak",""),r.get("home_streak",""),
             r.get("support_score",""),r.get("support_label",""),
+            r.get("away_sv_xwoba",""),r.get("away_sv_barrel",""),r.get("away_sv_whiff",""),r.get("away_sv_quality",""),
+            r.get("home_sv_xwoba",""),r.get("home_sv_barrel",""),r.get("home_sv_whiff",""),r.get("home_sv_quality",""),
+            r.get("away_sv_lineup",""),r.get("home_sv_lineup",""),r.get("away_sv_ev",""),r.get("home_sv_ev",""),
             r.get("away_ml",""),r.get("home_ml",""),r.get("total_line",""),r.get("over_odds",""),r.get("under_odds",""),r.get("yrfi_odds",""),r.get("nrfi_odds",""),
             r.get("away_ml_edge",""),r.get("away_ml_score",""),r.get("away_ml_flag",""),
             r.get("home_ml_edge",""),r.get("home_ml_score",""),r.get("home_ml_flag",""),
