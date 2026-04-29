@@ -1,0 +1,98 @@
+name: Faro Picks Logger
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date of picks (YYYY-MM-DD)"
+        required: true
+        default: ""
+      picks_json:
+        description: "Faro picks JSON array (paste from Claude)"
+        required: true
+        default: "[]"
+
+jobs:
+  log-faro-picks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install gspread google-auth
+
+      - name: Write credentials file
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run Faro tracker
+        env:
+          FARO_DATE:  ${{ github.event.inputs.date }}
+          FARO_PICKS: ${{ github.event.inputs.picks_json }}
+        run: |
+          python - <<'EOF'
+          import os, json, sys
+          sys.path.insert(0, ".")
+          from faro_tracker import write_faro_day
+
+          date_str = os.environ["FARO_DATE"].strip()
+          picks_raw = os.environ["FARO_PICKS"].strip()
+
+          if not date_str:
+              from datetime import date
+              date_str = date.today().strftime("%Y-%m-%d")
+
+          try:
+              picks = json.loads(picks_raw)
+          except json.JSONDecodeError as e:
+              print(f"❌ Invalid JSON: {e}")
+              sys.exit(1)
+
+          if not isinstance(picks, list) or len(picks) == 0:
+              print("❌ picks_json must be a non-empty JSON array")
+              sys.exit(1)
+
+          print(f"📥 {len(picks)} picks for {date_str}")
+          write_faro_day(picks, date_str)
+          EOF
+
+      - name: Update PENDING W/L
+        env:
+          FARO_DATE: ${{ github.event.inputs.date }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+          from faro_tracker import update_pending_wl
+
+          date_str = os.environ["FARO_DATE"].strip()
+          if not date_str:
+              from datetime import date
+              date_str = date.today().strftime("%Y-%m-%d")
+
+          # Try to resolve any already-settled actuals right away
+          update_pending_wl(date_str)
+          EOF
+
+      - name: Print summary
+        env:
+          FARO_DATE: ${{ github.event.inputs.date }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, ".")
+          from faro_tracker import print_comparison_summary
+
+          date_str = os.environ["FARO_DATE"].strip()
+          if not date_str:
+              from datetime import date
+              date_str = date.today().strftime("%Y-%m-%d")
+
+          print_comparison_summary(date_str)
+          EOF
