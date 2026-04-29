@@ -22,7 +22,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ── CONFIG ────────────────────────────────────────────────────
-SHEET_NAME   = "MLB Betting Model"
+SHEET_URL    = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
 FARO_TAB     = "🏟️ Faro vs Model"
 TRACKER_TAB  = "📊 Tracker"
 CREDS_FILE   = "credentials.json"
@@ -40,7 +40,7 @@ FARO_HEADERS = [
 ]
 
 # ── GOOGLE SHEETS AUTH ────────────────────────────────────────
-def get_sheet(sheet_name: str):
+def get_sheet():
     scopes = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -48,7 +48,7 @@ def get_sheet(sheet_name: str):
     creds_path = os.path.join(os.path.dirname(__file__), CREDS_FILE)
     creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
     gc    = gspread.authorize(creds)
-    return gc.open(sheet_name)
+    return gc.open_by_url(SHEET_URL)
 
 
 # ── TEAM NAME NORMALISER ──────────────────────────────────────
@@ -266,7 +266,7 @@ def write_faro_day(faro_picks: list, date_str: str = None):
     print(f"\n🏟️  FARO TRACKER — {date_str}")
     print(f"  📥 {len(faro_picks)} Faro picks to process\n")
 
-    sheet     = get_sheet(SHEET_NAME)
+    sheet     = get_sheet()
     ws        = ensure_faro_tab(sheet)
     our_picks = load_our_picks(sheet, date_str)
 
@@ -372,7 +372,7 @@ def update_pending_wl(date_str: str = None):
         date_str = datetime.date.today().strftime("%Y-%m-%d")
 
     print(f"\n🔄 Updating PENDING rows for {date_str}...")
-    sheet     = get_sheet(SHEET_NAME)
+    sheet     = get_sheet()
     ws        = sheet.worksheet(FARO_TAB)
     our_picks = load_our_picks(sheet, date_str)
 
@@ -440,7 +440,7 @@ def print_comparison_summary(date_str: str = None):
     if date_str is None:
         date_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    sheet    = get_sheet(SHEET_NAME)
+    sheet    = get_sheet()
     ws       = sheet.worksheet(FARO_TAB)
     all_rows = ws.get_all_values()
     if not all_rows:
