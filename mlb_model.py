@@ -3457,6 +3457,7 @@ def print_game_summary(r):
         )
         if flag and has_signal:
             ek=fk.replace("_flag","_edge"); edge=r.get(ek,""); odds=r.get(ok,""); prob_raw=r.get(pk)
+            sk=fk.replace("_flag","_score"); conf=r.get(sk,0) or 0  # confidence score
             if pk in ("away_win_pct","home_win_pct","yrfi_prob") and isinstance(prob_raw,float) and prob_raw<=1:
                 prob=round(prob_raw*100,1)
             else: prob=prob_raw
@@ -3465,7 +3466,6 @@ def print_game_summary(r):
             prob_str=f" | {prob:.1f}%" if isinstance(prob,(int,float)) else ""
             kelly_str=""
             if isinstance(prob,(int,float)) and isinstance(odds,int):
-                # Unit sizing from confidence score
                 conf_val = float(conf) if isinstance(conf,(int,float)) else 0
                 if conf_val >= 70:    units = 1.00
                 elif conf_val >= 60:  units = 0.75
