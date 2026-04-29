@@ -54,18 +54,28 @@ jobs:
           with open("faro_picks_input.json") as f:
               raw = f.read().strip()
 
+          print(f"Raw JSON preview: {raw[:120]}")
+
           try:
               picks = json.loads(raw)
           except json.JSONDecodeError as e:
-              print(f"❌ Invalid JSON: {e}")
-              print(f"Raw input was:\n{raw[:200]}")
+              print(f"Invalid JSON: {e}")
+              print(f"Raw input was:\n{raw[:400]}")
               sys.exit(1)
+
+          # Unwrap if double-nested: [[{...}]] -> [{...}]
+          if isinstance(picks, list) and len(picks) == 1 and isinstance(picks[0], list):
+              picks = picks[0]
 
           if not isinstance(picks, list) or len(picks) == 0:
-              print("❌ picks_json must be a non-empty JSON array")
+              print(f"Expected a list of dicts, got: {type(picks)}")
               sys.exit(1)
 
-          print(f"📥 {len(picks)} picks for {date_str}")
+          if not isinstance(picks[0], dict):
+              print(f"First element is {type(picks[0])}, expected dict")
+              sys.exit(1)
+
+          print(f"Loaded {len(picks)} picks for {date_str}")
           write_faro_day(picks, date_str)
           EOF
 
@@ -83,7 +93,6 @@ jobs:
               from datetime import date
               date_str = date.today().strftime("%Y-%m-%d")
 
-          # Try to resolve any already-settled actuals right away
           update_pending_wl(date_str)
           EOF
 
