@@ -435,8 +435,70 @@ def update_pending_wl(date_str: str = None):
 
 
 # ── PRINT SUMMARY ─────────────────────────────────────────────
+def push_summary_to_sheet(ws, all_rows: list):
+    """
+    Write cumulative + per-day summary to columns K-M.
+    Overwrites each run — never conflicts with data rows on left.
+    """
+    data_rows = [r for r in all_rows[1:] if len(r) >= 9 and r[0]]
+
+    # Comparable: both models have a real pick
+    comp   = [r for r in data_rows
+              if r[7] not in ("PENDING", "") and r[8] not in ("PENDING", "", "NO BET")]
+    faro_w = sum(1 for r in comp if r[7] == "WIN")
+    faro_l = sum(1 for r in comp if r[7] == "LOSS")
+    our_w  = sum(1 for r in comp if r[8] == "WIN")
+    our_l  = sum(1 for r in comp if r[8] == "LOSS")
+
+    # Faro all picks (every game he picks, settled)
+    faro_all = [r for r in data_rows if r[7] not in ("PENDING", "")]
+    fa_w = sum(1 for r in faro_all if r[7] == "WIN")
+    fa_l = sum(1 for r in faro_all if r[7] == "LOSS")
+
+    def pct(w, l):
+        t = w + l
+        return f"{w/t*100:.1f}%" if t > 0 else "—"
+
+    def wl(w, l):
+        return f"{w}-{l}"
+
+    # Per-day breakdown
+    dates = sorted(set(r[0] for r in data_rows if r[0]))
+    day_rows = []
+    for d in dates:
+        dc  = [r for r in comp     if r[0] == d]
+        df  = [r for r in faro_all if r[0] == d]
+        if not dc and not df:
+            continue
+        fw  = sum(1 for r in dc if r[7] == "WIN")
+        fl  = sum(1 for r in dc if r[7] == "LOSS")
+        ow  = sum(1 for r in dc if r[8] == "WIN")
+        ol  = sum(1 for r in dc if r[8] == "LOSS")
+        faw = sum(1 for r in df if r[7] == "WIN")
+        fal = sum(1 for r in df if r[7] == "LOSS")
+        day_rows.append([d, f"F:{wl(fw,fl)} O:{wl(ow,ol)}", f"FAll:{wl(faw,fal)}"])
+
+    block = [
+        ["FARO vs MODEL SUMMARY", "",             ""],
+        ["",                      "",             ""],
+        ["CUMULATIVE (comparable)","",             ""],
+        ["Model",                 "W-L",          "Win%"],
+        ["Faro",                  wl(faro_w, faro_l), pct(faro_w, faro_l)],
+        ["Our Model",             wl(our_w,  our_l),  pct(our_w,  our_l)],
+        ["",                      "",             ""],
+        ["FARO ALL PICKS",        "",             ""],
+        ["Faro (all games)",      wl(fa_w, fa_l), pct(fa_w, fa_l)],
+        ["",                      "",             ""],
+        ["BY DATE (comparable)",  "",             ""],
+        ["Date",                  "Faro / Ours",  "Faro All"],
+    ] + day_rows
+
+    ws.update(f"K1:M{len(block)}", block, value_input_option="USER_ENTERED")
+    print(f"  Summary block written to K1:M{len(block)}")
+
+
 def print_comparison_summary(date_str: str = None):
-    """Print a W/L comparison summary for a given date."""
+    """Print console W/L summary and refresh the sheet summary block."""
     if date_str is None:
         date_str = datetime.date.today().strftime("%Y-%m-%d")
 
@@ -446,29 +508,30 @@ def print_comparison_summary(date_str: str = None):
     if not all_rows:
         return
 
-    rows = [r for r in all_rows[1:] if len(r) >= 9 and r[0] == date_str
+    comp = [r for r in all_rows[1:] if len(r) >= 9 and r[0] == date_str
             and r[7] not in ("PENDING", "") and r[8] not in ("PENDING", "", "NO BET")]
 
-    if not rows:
-        print(f"No settled results for {date_str}")
-        return
+    if comp:
+        faro_wins = sum(1 for r in comp if r[7] == "WIN")
+        faro_loss = sum(1 for r in comp if r[7] == "LOSS")
+        our_wins  = sum(1 for r in comp if r[8] == "WIN")
+        our_loss  = sum(1 for r in comp if r[8] == "LOSS")
+        total     = len(comp)
+        print(f"\n FARO vs MODEL -- {date_str}")
+        print(f"{'='*40}")
+        print(f"  {'Model':<20} {'W':>4} {'L':>4} {'Win%':>7}")
+        print(f"  {'-'*35}")
+        print(f"  {'Faro':<20} {faro_wins:>4} {faro_loss:>4} {faro_wins/total*100:>6.1f}%")
+        print(f"  {'Our Model':<20} {our_wins:>4} {our_loss:>4} {our_wins/total*100:>6.1f}%")
+        print(f"\n  Comparable games: {total}")
+    else:
+        print(f"  No settled comparable results for {date_str}")
 
-    faro_wins  = sum(1 for r in rows if r[7] == "WIN")
-    faro_loss  = sum(1 for r in rows if r[7] == "LOSS")
-    our_wins   = sum(1 for r in rows if r[8] == "WIN")
-    our_loss   = sum(1 for r in rows if r[8] == "LOSS")
-    total      = len(rows)
-
-    print(f"\n📊 FARO vs MODEL — {date_str}")
-    print(f"{'='*40}")
-    print(f"  {'Model':<20} {'W':>4} {'L':>4} {'Win%':>7}")
-    print(f"  {'-'*35}")
-    print(f"  {'Faro':<20} {faro_wins:>4} {faro_loss:>4} {faro_wins/total*100:>6.1f}%")
-    print(f"  {'Our Model':<20} {our_wins:>4} {our_loss:>4} {our_wins/total*100:>6.1f}%")
-    print(f"\n  Games tracked: {total}")
+    # Always refresh the full cumulative summary block
+    push_summary_to_sheet(ws, all_rows)
 
 
-# ── MAIN ──────────────────────────────────────────────────────
+# -- MAIN ------------------------------------------------------
 if __name__ == "__main__":
     import sys
     args = sys.argv[1:]
