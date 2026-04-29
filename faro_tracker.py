@@ -318,7 +318,7 @@ def write_faro_day(faro_picks: list, date_str: str = None):
         faro_wl = derive_wl(faro_winner, away_team, home_team,
                             actual_away, actual_home)
         our_wl  = derive_wl(our_pick, away_team, home_team,
-                            actual_away, actual_home) if our_pick else "PENDING"
+                            actual_away, actual_home) if our_pick else "NO BET"
 
         # Actual winner label
         if actual_away is not None and actual_home is not None:
@@ -389,7 +389,7 @@ def update_pending_wl(date_str: str = None):
 
         if row[0] != date_str:
             continue
-        if "PENDING" not in (row[7], row[8]):
+        if "PENDING" not in (row[7], row[8]) or row[8] == "NO BET":
             continue
 
         game_str    = row[1].strip()
@@ -418,7 +418,7 @@ def update_pending_wl(date_str: str = None):
             actual_winner = "PUSH"
 
         faro_wl = derive_wl(faro_winner, away_team, home_team, actual_away, actual_home)
-        our_wl  = derive_wl(our_pick,    away_team, home_team, actual_away, actual_home) if our_pick else "PENDING"
+        our_wl  = derive_wl(our_pick,    away_team, home_team, actual_away, actual_home) if our_pick else "NO BET"
 
         # Update sheet: cols G (actual winner), H (faro wl), I (our wl) = indices 7,8,9 (1-based: col 7,8,9)
         faro_col_letter  = chr(ord("A") + FARO_HEADERS.index("Actual Winner"))
@@ -447,7 +447,7 @@ def print_comparison_summary(date_str: str = None):
         return
 
     rows = [r for r in all_rows[1:] if len(r) >= 9 and r[0] == date_str
-            and r[7] not in ("PENDING", "") and r[8] not in ("PENDING", "")]
+            and r[7] not in ("PENDING", "") and r[8] not in ("PENDING", "", "NO BET")]
 
     if not rows:
         print(f"No settled results for {date_str}")
