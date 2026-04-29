@@ -3440,14 +3440,22 @@ def print_game_summary(r):
     for fk,ok,label,pk in [
         ("away_ml_flag","away_ml",f"{away} ML","away_win_pct"),
         ("home_ml_flag","home_ml",f"{home} ML","home_win_pct"),
+        ("away_rl_flag","away_rl_odds",f"{away} RL +1.5","away_rl_prob"),
+        ("home_rl_flag","home_rl_odds",f"{home} RL +1.5","home_rl_prob"),
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}","over_prob"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}","under_prob"),
         ("f5_over_flag","f5_over_odds","F5 OVER","f5_over_prob"),
         ("yrfi_flag","yrfi_odds","YRFI","yrfi_prob"),
-        # NRFI removed — 42.5% win rate below breakeven
     ]:
         flag=r.get(fk,"")
-        if flag and ("STRONG" in str(flag) or ("LEAN" in str(flag) and "FADE" not in str(flag))):
+        fs = str(flag)
+        # New system: flag contains "%" and units — check it passed filters
+        has_signal = (
+            ("%" in fs and "SKIP" not in fs and "FADE" not in fs) or  # new conf% system
+            "STRONG" in fs or  # old label fallback
+            ("LEAN" in fs and "FADE" not in fs)
+        )
+        if flag and has_signal:
             ek=fk.replace("_flag","_edge"); edge=r.get(ek,""); odds=r.get(ok,""); prob_raw=r.get(pk)
             if pk in ("away_win_pct","home_win_pct","yrfi_prob") and isinstance(prob_raw,float) and prob_raw<=1:
                 prob=round(prob_raw*100,1)
