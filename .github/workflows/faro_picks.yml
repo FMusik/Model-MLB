@@ -31,10 +31,15 @@ jobs:
       - name: Write credentials file
         run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
+      - name: Write picks to file
+        run: |
+          cat > faro_picks_input.json << 'JSONEOF'
+          ${{ github.event.inputs.picks_json }}
+          JSONEOF
+
       - name: Run Faro tracker
         env:
-          FARO_DATE:  ${{ github.event.inputs.date }}
-          FARO_PICKS: ${{ github.event.inputs.picks_json }}
+          FARO_DATE: ${{ github.event.inputs.date }}
         run: |
           python - <<'EOF'
           import os, json, sys
@@ -42,16 +47,18 @@ jobs:
           from faro_tracker import write_faro_day
 
           date_str = os.environ["FARO_DATE"].strip()
-          picks_raw = os.environ["FARO_PICKS"].strip()
-
           if not date_str:
               from datetime import date
               date_str = date.today().strftime("%Y-%m-%d")
 
+          with open("faro_picks_input.json") as f:
+              raw = f.read().strip()
+
           try:
-              picks = json.loads(picks_raw)
+              picks = json.loads(raw)
           except json.JSONDecodeError as e:
               print(f"❌ Invalid JSON: {e}")
+              print(f"Raw input was:\n{raw[:200]}")
               sys.exit(1)
 
           if not isinstance(picks, list) or len(picks) == 0:
