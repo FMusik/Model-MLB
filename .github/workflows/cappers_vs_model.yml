@@ -474,9 +474,10 @@ jobs:
                   atr_wl  = row[COL_ATR_WL].strip()  if len(row) > COL_ATR_WL  else ""
                   our_wl  = row[COL_OUR_WL].strip()  if len(row) > COL_OUR_WL  else ""
 
-                  if faro_wl not in ("PENDING","") and atr_wl not in ("PENDING","") and our_wl not in ("PENDING",""):
+                  # Don't skip settled rows — still need to update Our Pick + Conf%
+                  all_settled = faro_wl not in ("PENDING","") and atr_wl not in ("PENDING","") and our_wl not in ("PENDING","")
+                  if all_settled:
                       skipped += 1
-                      continue
 
                   game      = row[COL_GAME].strip()
                   pick_type = row[COL_TYPE].strip()
@@ -509,8 +510,13 @@ jobs:
                   else:
                       new_atr_wl = atr_wl
 
-                  # Resolve Our W/L
+                  # Always write Our Pick + Conf% regardless of W/L status
                   our_pick = t_data.get("our_pick","")
+                  our_conf = t_data.get("our_conf","")
+                  ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
+                  ws_unified.update_cell(i, COL_OUR_CONF + 1, our_conf)
+
+                  # Resolve Our W/L
                   if our_wl in ("PENDING",""):
                       if not our_pick:
                           new_our_wl = "NO BET"
@@ -518,9 +524,7 @@ jobs:
                           new_our_wl = resolve_ml(our_pick, away_score, home_score, game)
                       else:
                           new_our_wl = resolve_total(our_pick, away_score, home_score)
-                      ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
-                      ws_unified.update_cell(i, COL_OUR_CONF  + 1, t_data.get("our_conf",""))
-                      ws_unified.update_cell(i, COL_OUR_WL   + 1, new_our_wl)
+                      ws_unified.update_cell(i, COL_OUR_WL + 1, new_our_wl)
                   else:
                       new_our_wl = our_wl
 
