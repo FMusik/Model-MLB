@@ -61,7 +61,7 @@ jobs:
               "Date", "Game", "Type",
               "Faro Pick", "Faro Conf%",
               "Atropa Pick", "Atropa Book", "Atropa Proj",
-              "Our Pick", "Our Proj",
+              "Our Pick", "Conf%",
               "Faro W/L", "Atropa W/L", "Our W/L",
           ]
 
@@ -75,7 +75,7 @@ jobs:
           COL_ATR_BOOK   = 6
           COL_ATR_PROJ   = 7
           COL_OUR_PICK   = 8
-          COL_OUR_PROJ   = 9
+          COL_OUR_CONF   = 9
           COL_FARO_WL    = 10
           COL_ATR_WL     = 11
           COL_OUR_WL     = 12
@@ -275,7 +275,7 @@ jobs:
                       faro_pick = row[2].strip()
                       faro_conf = row[3].strip()
                       our_pick  = row[4].strip() if len(row) > 4 else ""
-                      our_proj  = row[5].strip() if len(row) > 5 else ""
+                      # our_proj removed — using Conf% instead
                       faro_wl   = row[7].strip() if len(row) > 7 else "PENDING"
                       our_wl    = row[8].strip() if len(row) > 8 else "PENDING"
 
@@ -290,7 +290,7 @@ jobs:
                       new_row[COL_FARO_PICK] = faro_pick
                       new_row[COL_FARO_CONF] = faro_conf
                       new_row[COL_OUR_PICK]  = our_pick
-                      new_row[COL_OUR_PROJ]  = our_proj
+                      new_row[COL_OUR_CONF]  = ""
                       new_row[COL_FARO_WL]   = faro_wl
                       new_row[COL_ATR_WL]    = ""
                       new_row[COL_OUR_WL]    = our_wl
@@ -437,13 +437,14 @@ jobs:
 
               date_col   = find_col(hdrs, "date")
               game_col   = find_col(hdrs, "game", "matchup")
-              away_act   = find_col(hdrs, "actual away", "away score")
-              home_act   = find_col(hdrs, "actual home", "home score")
-              our_pick_c  = find_col(hdrs, "bet type", "our pick", "pick")
-              our_prob_c  = find_col(hdrs, "our prob%", "our prob", "conf%")
-              our_proj_c  = find_col(hdrs, "our proj total", "our proj away", "our proj")
+              # Hardcoded indices based on confirmed Tracker headers:
+              # A=Date, B=Game, C=Bet Type, E=Conf%, T=Actual Away, U=Actual Home
+              our_pick_c  = 2   # C = Bet Type
+              our_conf_c  = 4   # E = Conf%
+              away_act    = 19  # T = Actual Away
+              home_act    = 20  # U = Actual Home
 
-              print(f"   📍 Tracker cols — date:{date_col} game:{game_col} away_act:{away_act} home_act:{home_act} our_pick:{our_pick_c} our_prob:{our_prob_c} our_proj:{our_proj_c}")
+              print(f"   📍 Using hardcoded Tracker cols — pick:C(2) prob:F(5) proj_total:L(11) away_actual:T(19) home_actual:U(20)")
 
               tracker_lookup = {}
               for row in tracker_rows[1:]:
@@ -454,14 +455,12 @@ jobs:
                   raw_pick  = row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else ""
                   # Strip ML/RL suffixes from Bet Type: "Milwaukee Brewers ML" -> "Milwaukee Brewers"
                   clean_pick = re.sub(r" (ML|RL[^a-zA-Z]*.*)$", "", raw_pick, flags=re.IGNORECASE).strip()
-                  our_prob = row[our_prob_c].strip() if our_prob_c is not None and len(row) > our_prob_c else ""
-                  our_proj = row[our_proj_c].strip() if our_proj_c is not None and len(row) > our_proj_c else ""
+                  our_conf = row[our_conf_c].strip() if our_conf_c is not None and len(row) > our_conf_c else ""
                   tracker_lookup[(t_date, normalize_game(t_game))] = {
                       "away_actual": row[away_act].strip() if away_act is not None and len(row) > away_act else "",
                       "home_actual": row[home_act].strip() if home_act is not None and len(row) > home_act else "",
                       "our_pick":    clean_pick,
-                      "our_prob":    our_prob,   # win probability for ML
-                      "our_proj":    our_proj,   # projected total for Totals
+                      "our_conf":    our_conf,
                   }
 
               all_rows = ws_unified.get_all_values()
@@ -520,9 +519,7 @@ jobs:
                       else:
                           new_our_wl = resolve_total(our_pick, away_score, home_score)
                       ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
-                      # ML → use win probability, Total → use projected total
-                      our_proj_val = t_data.get("our_prob","") if pick_type == "ML" else t_data.get("our_proj","")
-                      ws_unified.update_cell(i, COL_OUR_PROJ  + 1, our_proj_val)
+                      ws_unified.update_cell(i, COL_OUR_CONF  + 1, t_data.get("our_conf",""))
                       ws_unified.update_cell(i, COL_OUR_WL   + 1, new_our_wl)
                   else:
                       new_our_wl = our_wl
