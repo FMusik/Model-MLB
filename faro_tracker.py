@@ -278,8 +278,17 @@ def write_faro_day(faro_picks: list, date_str: str = None):
             existing_games.add(row[1].strip().lower())
 
     rows_to_add = []
+    rows_to_update = []  # (sheet_row_index, updated_row_data)
     matched = 0
     unmatched = []
+
+    # Count matchup occurrences in today's picks to detect doubleheaders
+    matchup_counts = {}
+    for pick in faro_picks:
+        key = f"{norm(pick.get('away',''))} @ {norm(pick.get('home',''))}".lower()
+        matchup_counts[key] = matchup_counts.get(key, 0) + 1
+
+    matchup_seen = {}  # track how many times we've seen each matchup
 
     for pick in faro_picks:
         faro_away = pick.get("away", "")
@@ -291,7 +300,7 @@ def write_faro_day(faro_picks: list, date_str: str = None):
         game_key, tracker_data = match_game(faro_away, faro_home, our_picks)
 
         if tracker_data:
-            game_str    = game_key
+            base_str    = game_key
             away_team   = tracker_data["away_team"]
             home_team   = tracker_data["home_team"]
             our_pick    = tracker_data["our_pick"]
@@ -303,16 +312,28 @@ def write_faro_day(faro_picks: list, date_str: str = None):
             # No match in our tracker — still log Faro pick
             away_team   = norm(faro_away)
             home_team   = norm(faro_home)
-            game_str    = f"{away_team} @ {home_team}"
+            base_str    = f"{away_team} @ {home_team}"
             our_pick    = "NO BET"
             our_proj    = "NO BET"
             actual_away = None
             actual_home = None
-            unmatched.append(game_str)
+            unmatched.append(base_str)
 
-        if game_str.lower() in existing_games:
-            print(f"  ⏭️  Already logged: {game_str}")
-            continue
+        # Handle doubleheaders — append G1/G2 if matchup appears more than once
+        base_key = base_str.lower()
+        matchup_seen[base_key] = matchup_seen.get(base_key, 0) + 1
+        if matchup_counts.get(base_key, 1) > 1:
+            game_str = f"{base_str} (G{matchup_seen[base_key]})"
+        else:
+            game_str = base_str
+
+        # Check if this game already exists in sheet
+        existing_row_idx = None
+        for idx, erow in enumerate(existing[1:], start=2):
+            if (len(erow) >= 2 and erow[0] == date_str
+                    and erow[1].strip().lower() == game_str.lower()):
+                existing_row_idx = idx
+                break
 
         # Derive W/L
         faro_wl = derive_wl(faro_winner, away_team, home_team,
