@@ -353,23 +353,22 @@ jobs:
           # ── WRITE FARO PICKS ──────────────────────────────────
           def write_faro(sheet, ws_unified, picks, date_str):
               existing_keys = get_existing_keys(ws_unified)
+              all_rows = ws_unified.get_all_values()
               written = 0
+              updates = []
               for p in picks:
-                  game     = p.get("game", "")
+                  game      = p.get("game", "")
                   faro_pick = p.get("faro_pick", "")
                   faro_conf = p.get("conf_pct", "")
                   key = (date_str, normalize_game(game), "ML")
                   if key in existing_keys:
-                      # Update Faro columns in existing row instead
-                      all_rows = ws_unified.get_all_values()
                       for i, row in enumerate(all_rows[1:], start=2):
                           if row[COL_DATE] == date_str and normalize_game(row[COL_GAME]) == normalize_game(game) and row[COL_TYPE].upper() == "ML":
-                              ws_unified.update_cell(i, COL_FARO_PICK + 1, faro_pick)
-                              ws_unified.update_cell(i, COL_FARO_CONF + 1, str(faro_conf))
+                              updates.append({"range": f"D{i}", "values": [[faro_pick]]})
+                              updates.append({"range": f"E{i}", "values": [[str(faro_conf)]]})
                               print(f"   🔄 Updated Faro cols: {game}")
                               break
                       continue
-
                   new_row = [""] * len(HEADERS)
                   new_row[COL_DATE]      = date_str
                   new_row[COL_GAME]      = game
@@ -383,12 +382,16 @@ jobs:
                   existing_keys.add(key)
                   written += 1
                   print(f"   ✅ Faro: {game} | {faro_pick} | {faro_conf}%")
+              if updates:
+                  ws_unified.batch_update(updates)
               print(f"   📊 {written} new Faro rows written")
 
           # ── WRITE ATROPA PICKS ────────────────────────────────
           def write_atropa(sheet, ws_unified, picks, date_str):
               existing_keys = get_existing_keys(ws_unified)
+              all_rows = ws_unified.get_all_values()
               written = 0
+              updates = []
               for p in picks:
                   matchup   = p.get("matchup", "")
                   game_full = expand_matchup(matchup)
@@ -399,13 +402,11 @@ jobs:
 
                   key = (date_str, normalize_game(game_full), pick_type.upper())
                   if key in existing_keys:
-                      # Update Atropa columns in existing row
-                      all_rows = ws_unified.get_all_values()
                       for i, row in enumerate(all_rows[1:], start=2):
                           if row[COL_DATE] == date_str and normalize_game(row[COL_GAME]) == normalize_game(game_full) and row[COL_TYPE].upper() == pick_type.upper():
-                              ws_unified.update_cell(i, COL_ATR_PICK + 1, atr_pick)
-                              ws_unified.update_cell(i, COL_ATR_BOOK + 1, atr_book)
-                              ws_unified.update_cell(i, COL_ATR_PROJ + 1, atr_proj)
+                              updates.append({"range": f"F{i}", "values": [[atr_pick]]})
+                              updates.append({"range": f"G{i}", "values": [[atr_book]]})
+                              updates.append({"range": f"H{i}", "values": [[atr_proj]]})
                               print(f"   🔄 Updated Atropa cols: {game_full}")
                               break
                       continue
@@ -424,6 +425,8 @@ jobs:
                   existing_keys.add(key)
                   written += 1
                   print(f"   ✅ Atropa: {game_full} | {atr_pick} | {atr_proj}")
+              if updates:
+                  ws_unified.batch_update(updates)
               print(f"   📊 {written} new Atropa rows written")
 
           # ── UPDATE W/L FROM TRACKER ───────────────────────────
@@ -604,9 +607,8 @@ jobs:
                   ["Our Model",         o_w, o_l, o_pct],
                   ["Faro+Atropa Agree", agree_wins, agree_total - agree_wins, agree_pct],
               ]
-              for row_idx, row_data in enumerate(summary_block, start=1):
-                  for col_offset, val in enumerate(row_data):
-                      ws_unified.update_cell(row_idx, SUMMARY_COL + col_offset, val)
+              # Single batch_update for entire summary block
+              ws_unified.update("P1:S8", summary_block, value_input_option="USER_ENTERED")
               print(f"   ✅ Summary written to sheet cols P-S")
 
           # ── ATROPA BACKFILL DATA ───────────────────────────────
