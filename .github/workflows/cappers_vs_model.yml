@@ -23,6 +23,10 @@ on:
         description: "Migrate existing Faro + Atropa tabs into unified tab? (yes/no)"
         required: false
         default: "no"
+      rebuild:
+        description: "Full rebuild — migrate + all Atropa dates + backfill + W/L (yes/no)"
+        required: false
+        default: "no"
 
 jobs:
   cappers-vs-model:
@@ -50,6 +54,7 @@ jobs:
           ATROPA_JSON: ${{ github.event.inputs.atropa_json }}
           MIGRATE:     ${{ github.event.inputs.migrate }}
           BACKFILL:    ${{ github.event.inputs.backfill }}
+          REBUILD:     ${{ github.event.inputs.rebuild }}
         run: |
           python - <<'EOF'
           import os, json, sys, re, datetime, gspread
@@ -604,47 +609,119 @@ jobs:
                       ws_unified.update_cell(row_idx, SUMMARY_COL + col_offset, val)
               print(f"   ✅ Summary written to sheet cols P-S")
 
+          # ── ATROPA BACKFILL DATA ───────────────────────────────
+          ATROPA_HISTORY = {
+              "2026-04-26": [
+                  {"matchup": "SDP@ARI", "type": "Total", "pick": "U15.5", "book": "-105", "proj": "proj 8.9 (+6.6)"},
+                  {"matchup": "NYY@HOU", "type": "Total", "pick": "O9.5",  "book": "-106", "proj": "proj 10.7 (+1.2)"},
+                  {"matchup": "CLE@TOR", "type": "Total", "pick": "O8.5",  "book": "109",  "proj": "proj 9.5 (+1.0)"},
+                  {"matchup": "COL@NYM", "type": "Total", "pick": "O7.5",  "book": "-108", "proj": "proj 8.5 (+1.0)"},
+                  {"matchup": "CHC@LAD", "type": "Total", "pick": "U9.5",  "book": "-121", "proj": "proj 8.4 (+1.1)"},
+                  {"matchup": "LAA@KCR", "type": "ML",    "pick": "LAA ML","book": "110",  "proj": "54% win"},
+                  {"matchup": "DET@CIN", "type": "ML",    "pick": "CIN ML","book": "-104", "proj": "57% win"},
+                  {"matchup": "PHI@ATL", "type": "ML",    "pick": "ATL ML","book": "-161", "proj": "68% win"},
+                  {"matchup": "MIN@TBR", "type": "ML",    "pick": "TBR ML","book": "-131", "proj": "63% win"},
+                  {"matchup": "WSN@CWS", "type": "ML",    "pick": "CWS ML","book": "-122", "proj": "61% win"},
+                  {"matchup": "SEA@STL", "type": "ML",    "pick": "STL ML","book": "126",  "proj": "59% win"},
+                  {"matchup": "PIT@MIL", "type": "ML",    "pick": "PIT ML","book": "112",  "proj": "52% win"},
+                  {"matchup": "CHC@LAD", "type": "ML",    "pick": "LAD ML","book": "-126", "proj": "59% win"},
+                  {"matchup": "OAK@TEX", "type": "ML",    "pick": "OAK ML","book": "112",  "proj": "50% win"},
+                  {"matchup": "NYY@HOU", "type": "ML",    "pick": "NYY ML","book": "-129", "proj": "58% win"},
+              ],
+              "2026-04-29": [
+                  {"matchup": "CHC@SDP", "type": "Total", "pick": "O8.5",  "book": "-124", "proj": "proj 10.2 (+1.7)"},
+                  {"matchup": "ARI@MIL", "type": "Total", "pick": "O8.5",  "book": "-106", "proj": "proj 10.1 (+1.6)"},
+                  {"matchup": "TBR@CLE", "type": "Total", "pick": "O6.5",  "book": "-115", "proj": "proj 7.8 (+1.3)"},
+                  {"matchup": "NYY@TEX", "type": "Total", "pick": "U8.5",  "book": "104",  "proj": "proj 7.2 (+1.3)"},
+                  {"matchup": "LAA@CWS", "type": "Total", "pick": "O8.5",  "book": "108",  "proj": "proj 9.6 (+1.1)"},
+                  {"matchup": "SEA@MIN", "type": "Total", "pick": "O7.5",  "book": "-111", "proj": "proj 8.6 (+1.1)"},
+                  {"matchup": "BOS@TOR", "type": "Total", "pick": "O8.5",  "book": "106",  "proj": "proj 9.6 (+1.1)"},
+                  {"matchup": "WSN@NYM", "type": "Total", "pick": "O7.5",  "book": "-114", "proj": "proj 8.6 (+1.1)"},
+                  {"matchup": "KCR@OAK", "type": "Total", "pick": "U9.5",  "book": "106",  "proj": "proj 8.5 (+1.0)"},
+                  {"matchup": "HOU@BAL", "type": "ML",    "pick": "HOU ML","book": "107",  "proj": "57% win"},
+                  {"matchup": "CHC@SDP", "type": "ML",    "pick": "CHC ML","book": "-104", "proj": "58% win"},
+                  {"matchup": "COL@CIN", "type": "ML",    "pick": "COL ML","book": "126",  "proj": "51% win"},
+                  {"matchup": "ARI@MIL", "type": "ML",    "pick": "ARI ML","book": "105",  "proj": "54% win"},
+                  {"matchup": "KCR@OAK", "type": "ML",    "pick": "KCR ML","book": "107",  "proj": "52% win"},
+                  {"matchup": "STL@PIT", "type": "ML",    "pick": "PIT ML","book": "-140", "proj": "62% win"},
+                  {"matchup": "TBR@CLE", "type": "ML",    "pick": "TBR ML","book": "106",  "proj": "52% win"},
+                  {"matchup": "LAA@CWS", "type": "ML",    "pick": "LAA ML","book": "-115", "proj": "56% win"},
+                  {"matchup": "SEA@MIN", "type": "ML",    "pick": "SEA ML","book": "-121", "proj": "56% win"},
+                  {"matchup": "BOS@TOR", "type": "ML",    "pick": "TOR ML","book": "-122", "proj": "56% win"},
+                  {"matchup": "DET@ATL", "type": "ML",    "pick": "DET ML","book": "-138", "proj": "59% win"},
+              ],
+              "2026-04-30": [
+                  {"matchup": "WSN@NYM", "type": "Total", "pick": "O7.5",  "book": "-111", "proj": "proj 9.3 (+1.8)"},
+                  {"matchup": "TOR@MIN", "type": "Total", "pick": "O7.5",  "book": "-110", "proj": "proj 8.5 (+1.0)"},
+                  {"matchup": "DET@ATL", "type": "ML",    "pick": "DET ML","book": "+110", "proj": "52% win"},
+                  {"matchup": "TOR@MIN", "type": "ML",    "pick": "TOR ML","book": "-122", "proj": "58% win"},
+                  {"matchup": "ARI@MIL", "type": "ML",    "pick": "MIL ML","book": "-121", "proj": "56% win"},
+                  {"matchup": "WSN@NYM", "type": "ML",    "pick": "NYM ML","book": "-198", "proj": "67% win"},
+              ],
+              "2026-05-01": [
+                  {"matchup": "ARI@CHC", "type": "Total", "pick": "O7.5",  "book": "115",  "proj": "proj 8.6 (+1.1)"},
+                  {"matchup": "NYM@LAA", "type": "Total", "pick": "O9.5",  "book": "113",  "proj": "proj 10.6 (+1.1)"},
+                  {"matchup": "CLE@OAK", "type": "Total", "pick": "U9.5",  "book": "-108", "proj": "proj 8.4 (+1.1)"},
+                  {"matchup": "TOR@MIN", "type": "Total", "pick": "O8.5",  "book": "-109", "proj": "proj 9.5 (+1.0)"},
+                  {"matchup": "CWS@SDP", "type": "ML",    "pick": "CWS ML","book": "129",  "proj": "62% win"},
+                  {"matchup": "NYM@LAA", "type": "ML",    "pick": "LAA ML","book": "106",  "proj": "55% win"},
+                  {"matchup": "CLE@OAK", "type": "ML",    "pick": "CLE ML","book": "100",  "proj": "55% win"},
+                  {"matchup": "MIL@WSN", "type": "ML",    "pick": "MIL ML","book": "-150", "proj": "63% win"},
+                  {"matchup": "TOR@MIN", "type": "ML",    "pick": "TOR ML","book": "-104", "proj": "54% win"},
+                  {"matchup": "LAD@STL", "type": "ML",    "pick": "LAD ML","book": "-167", "proj": "64% win"},
+                  {"matchup": "PHI@MIA", "type": "ML",    "pick": "PHI ML","book": "-118", "proj": "55% win"},
+                  {"matchup": "ARI@CHC", "type": "ML",    "pick": "CHC ML","book": "-126", "proj": "56% win"},
+                  {"matchup": "TEX@DET", "type": "ML",    "pick": "TEX ML","book": "101",  "proj": "50% win"},
+              ],
+          }
+
           # ── MAIN ──────────────────────────────────────────────
           date_str    = os.environ.get("RUN_DATE","").strip() or datetime.date.today().isoformat()
           faro_raw    = os.environ.get("FARO_JSON","[]").strip()
           atropa_raw  = os.environ.get("ATROPA_JSON","[]").strip()
           do_migrate  = os.environ.get("MIGRATE","no").strip().lower() == "yes"
+          do_rebuild  = os.environ.get("REBUILD","no").strip().lower() == "yes"
 
           print(f"📅 Date: {date_str}")
-          print(f"Raw Faro preview:   {faro_raw[:80]}")
-          print(f"Raw Atropa preview: {atropa_raw[:80]}")
 
-          sheet     = get_sheet()
+          sheet      = get_sheet()
           ws_unified = get_or_create_tab(sheet)
 
-          if do_migrate:
+          if do_rebuild:
+              print(f"\n🔨 FULL REBUILD MODE")
+              # Step 1: Migrate Faro
               migrate(sheet, ws_unified)
+              # Step 2: Write all Atropa history dates
+              for atr_date, picks in sorted(ATROPA_HISTORY.items()):
+                  print(f"\n⚾ Writing {len(picks)} Atropa picks for {atr_date}...")
+                  write_atropa(sheet, ws_unified, picks, atr_date)
+          else:
+              print(f"Raw Faro preview:   {faro_raw[:80]}")
+              print(f"Raw Atropa preview: {atropa_raw[:80]}")
+              if do_migrate:
+                  migrate(sheet, ws_unified)
+              try:
+                  faro_picks = json.loads(faro_raw)
+                  if isinstance(faro_picks, list) and len(faro_picks) == 1 and isinstance(faro_picks[0], list):
+                      faro_picks = faro_picks[0]
+              except json.JSONDecodeError as e:
+                  print(f"❌ Faro JSON error: {e}")
+                  faro_picks = []
+              try:
+                  atropa_picks = json.loads(atropa_raw)
+                  if isinstance(atropa_picks, list) and len(atropa_picks) == 1 and isinstance(atropa_picks[0], list):
+                      atropa_picks = atropa_picks[0]
+              except json.JSONDecodeError as e:
+                  print(f"❌ Atropa JSON error: {e}")
+                  atropa_picks = []
+              if faro_picks:
+                  print(f"\n⚾ Writing {len(faro_picks)} Faro picks...")
+                  write_faro(sheet, ws_unified, faro_picks, date_str)
+              if atropa_picks:
+                  print(f"\n⚾ Writing {len(atropa_picks)} Atropa picks...")
+                  write_atropa(sheet, ws_unified, atropa_picks, date_str)
 
-          try:
-              faro_picks = json.loads(faro_raw)
-              if isinstance(faro_picks, list) and len(faro_picks) == 1 and isinstance(faro_picks[0], list):
-                  faro_picks = faro_picks[0]
-          except json.JSONDecodeError as e:
-              print(f"❌ Faro JSON error: {e}")
-              faro_picks = []
-
-          try:
-              atropa_picks = json.loads(atropa_raw)
-              if isinstance(atropa_picks, list) and len(atropa_picks) == 1 and isinstance(atropa_picks[0], list):
-                  atropa_picks = atropa_picks[0]
-          except json.JSONDecodeError as e:
-              print(f"❌ Atropa JSON error: {e}")
-              atropa_picks = []
-
-          if faro_picks:
-              print(f"\n⚾ Writing {len(faro_picks)} Faro picks...")
-              write_faro(sheet, ws_unified, faro_picks, date_str)
-
-          if atropa_picks:
-              print(f"\n⚾ Writing {len(atropa_picks)} Atropa picks...")
-              write_atropa(sheet, ws_unified, atropa_picks, date_str)
-
-          do_backfill = os.environ.get("BACKFILL","no").strip().lower() == "yes"
+          do_backfill = os.environ.get("BACKFILL","no").strip().lower() == "yes" or do_rebuild
           if do_backfill:
               print(f"\n🔁 Backfilling Our Pick + Conf% for ALL rows...")
               ws_tracker   = sheet.worksheet(TRACKER_TAB)
