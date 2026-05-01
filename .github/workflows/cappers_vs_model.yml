@@ -102,7 +102,8 @@ jobs:
               "MIN": "Minnesota Twins",
               "NYM": "New York Mets",
               "NYY": "New York Yankees",
-              "OAK": "Oakland Athletics",
+              "OAK": "Athletics",
+              "ATH": "Athletics",
               "PHI": "Philadelphia Phillies",
               "PIT": "Pittsburgh Pirates",
               "SD":  "San Diego Padres",
@@ -139,6 +140,38 @@ jobs:
           FULL_TO_ABBREV = {v.upper(): k for k, v in ABBREV_TO_FULL.items()}
           FULL_TO_ABBREV["SAN DIEGO PADRES"]    = "SDP"
           FULL_TO_ABBREV["WASHINGTON NATIONALS"] = "WSN"
+          FULL_TO_ABBREV["ATHLETICS"]             = "OAK"
+          FULL_TO_ABBREV["OAKLAND ATHLETICS"]     = "OAK"
+          FULL_TO_ABBREV["TAMPA BAY RAYS"]        = "TBR"
+          FULL_TO_ABBREV["KANSAS CITY ROYALS"]    = "KCR"
+          FULL_TO_ABBREV["SAN FRANCISCO GIANTS"]  = "SFG"
+          FULL_TO_ABBREV["CHICAGO WHITE SOX"]     = "CWS"
+          FULL_TO_ABBREV["CHICAGO CUBS"]          = "CHC"
+          FULL_TO_ABBREV["NEW YORK YANKEES"]      = "NYY"
+          FULL_TO_ABBREV["NEW YORK METS"]         = "NYM"
+          FULL_TO_ABBREV["LOS ANGELES DODGERS"]   = "LAD"
+          FULL_TO_ABBREV["LOS ANGELES ANGELS"]    = "LAA"
+          FULL_TO_ABBREV["BOSTON RED SOX"]        = "BOS"
+          FULL_TO_ABBREV["TORONTO BLUE JAYS"]     = "TOR"
+          FULL_TO_ABBREV["MINNESOTA TWINS"]       = "MIN"
+          FULL_TO_ABBREV["CLEVELAND GUARDIANS"]   = "CLE"
+          FULL_TO_ABBREV["DETROIT TIGERS"]        = "DET"
+          FULL_TO_ABBREV["HOUSTON ASTROS"]        = "HOU"
+          FULL_TO_ABBREV["SEATTLE MARINERS"]      = "SEA"
+          FULL_TO_ABBREV["TEXAS RANGERS"]         = "TEX"
+          FULL_TO_ABBREV["BALTIMORE ORIOLES"]     = "BAL"
+          FULL_TO_ABBREV["MIAMI MARLINS"]         = "MIA"
+          FULL_TO_ABBREV["PHILADELPHIA PHILLIES"] = "PHI"
+          FULL_TO_ABBREV["ATLANTA BRAVES"]        = "ATL"
+          FULL_TO_ABBREV["NEW YORK METS"]         = "NYM"
+          FULL_TO_ABBREV["PITTSBURGH PIRATES"]    = "PIT"
+          FULL_TO_ABBREV["ST. LOUIS CARDINALS"]   = "STL"
+          FULL_TO_ABBREV["MILWAUKEE BREWERS"]     = "MIL"
+          FULL_TO_ABBREV["CINCINNATI REDS"]       = "CIN"
+          FULL_TO_ABBREV["COLORADO ROCKIES"]      = "COL"
+          FULL_TO_ABBREV["ARIZONA DIAMONDBACKS"]  = "ARI"
+          FULL_TO_ABBREV["MIAMI MARLINS"]         = "MIA"
+          FULL_TO_ABBREV["WASHINGTON NATIONALS"]  = "WSN"
 
           def normalize_game(game_str):
               """Normalize to ABBREV@ABBREV for reliable dedup matching."""
@@ -406,10 +439,11 @@ jobs:
               game_col   = find_col(hdrs, "game", "matchup")
               away_act   = find_col(hdrs, "actual away", "away score")
               home_act   = find_col(hdrs, "actual home", "home score")
-              our_pick_c = find_col(hdrs, "bet type", "our pick", "pick")
-              our_proj_c = find_col(hdrs, "our proj away", "our proj", "proj score")
+              our_pick_c  = find_col(hdrs, "bet type", "our pick", "pick")
+              our_prob_c  = find_col(hdrs, "our prob%", "our prob", "conf%")
+              our_proj_c  = find_col(hdrs, "our proj total", "our proj away", "our proj")
 
-              print(f"   📍 Tracker cols — date:{date_col} game:{game_col} away_act:{away_act} home_act:{home_act} our_pick:{our_pick_c} our_proj:{our_proj_c}")
+              print(f"   📍 Tracker cols — date:{date_col} game:{game_col} away_act:{away_act} home_act:{home_act} our_pick:{our_pick_c} our_prob:{our_prob_c} our_proj:{our_proj_c}")
 
               tracker_lookup = {}
               for row in tracker_rows[1:]:
@@ -420,11 +454,14 @@ jobs:
                   raw_pick  = row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else ""
                   # Strip ML/RL suffixes from Bet Type: "Milwaukee Brewers ML" -> "Milwaukee Brewers"
                   clean_pick = re.sub(r" (ML|RL[^a-zA-Z]*.*)$", "", raw_pick, flags=re.IGNORECASE).strip()
+                  our_prob = row[our_prob_c].strip() if our_prob_c is not None and len(row) > our_prob_c else ""
+                  our_proj = row[our_proj_c].strip() if our_proj_c is not None and len(row) > our_proj_c else ""
                   tracker_lookup[(t_date, normalize_game(t_game))] = {
-                      "away_actual": row[away_act].strip()   if away_act   is not None and len(row) > away_act   else "",
-                      "home_actual": row[home_act].strip()   if home_act   is not None and len(row) > home_act   else "",
+                      "away_actual": row[away_act].strip() if away_act is not None and len(row) > away_act else "",
+                      "home_actual": row[home_act].strip() if home_act is not None and len(row) > home_act else "",
                       "our_pick":    clean_pick,
-                      "our_proj":    row[our_proj_c].strip() if our_proj_c is not None and len(row) > our_proj_c else "",
+                      "our_prob":    our_prob,   # win probability for ML
+                      "our_proj":    our_proj,   # projected total for Totals
                   }
 
               all_rows = ws_unified.get_all_values()
@@ -483,7 +520,9 @@ jobs:
                       else:
                           new_our_wl = resolve_total(our_pick, away_score, home_score)
                       ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
-                      ws_unified.update_cell(i, COL_OUR_PROJ  + 1, t_data.get("our_proj",""))
+                      # ML → use win probability, Total → use projected total
+                      our_proj_val = t_data.get("our_prob","") if pick_type == "ML" else t_data.get("our_proj","")
+                      ws_unified.update_cell(i, COL_OUR_PROJ  + 1, our_proj_val)
                       ws_unified.update_cell(i, COL_OUR_WL   + 1, new_our_wl)
                   else:
                       new_our_wl = our_wl
