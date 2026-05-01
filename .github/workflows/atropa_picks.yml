@@ -1,0 +1,116 @@
+name: Atropa Picks Logger
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date of picks (YYYY-MM-DD)"
+        required: true
+        default: ""
+      picks_json:
+        description: "Atropa picks JSON array (paste from Claude)"
+        required: true
+        default: "[]"
+
+jobs:
+  log-atropa-picks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install gspread google-auth
+
+      - name: Write credentials file
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Write Atropa picks to sheet
+        env:
+          ATROPA_DATE:  ${{ github.event.inputs.date }}
+          ATROPA_PICKS: ${{ github.event.inputs.picks_json }}
+        run: |
+          python - <<'EOF'
+          import os, json, sys, datetime, gspread
+          from google.oauth2.service_account import Credentials
+
+          SHEET_URL  = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
+          ATROPA_TAB = "📸 Atropa vs Model"
+          HEADERS    = [
+              "Date", "Game", "Time", "Type",
+              "Atropa Pick", "Atropa Book", "Atropa Proj",
+              "Our Pick", "Our Proj", "Agreement",
+              "Atropa W/L", "Our W/L",
+          ]
+
+          def get_sheet():
+              scopes = [
+                  "https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive",
+              ]
+              creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+              gc    = gspread.authorize(creds)
+              return gc.open_by_url(SHEET_URL)
+
+          def get_or_create_tab(sheet):
+              try:
+                  ws = sheet.worksheet(ATROPA_TAB)
+                  print(f"📋 Found tab: {ATROPA_TAB}")
+              except gspread.WorksheetNotFound:
+                  ws = sheet.add_worksheet(title=ATROPA_TAB, rows=500, cols=len(HEADERS))
+                  ws.append_row(HEADERS)
+                  print(f"✅ Created tab: {ATROPA_TAB}")
+              return ws
+
+          # ── Parse inputs ──
+          date_str  = os.environ.get("ATROPA_DATE", "").strip()
+          picks_raw = os.environ.get("ATROPA_PICKS", "[]").strip()
+
+          if not date_str:
+              date_str = datetime.date.today().isoformat()
+
+          try:
+              picks = json.loads(picks_raw)
+          except json.JSONDecodeError as e:
+              print(f"❌ Invalid JSON: {e}")
+              sys.exit(1)
+
+          if not isinstance(picks, list) or len(picks) == 0:
+              print("❌ picks_json must be a non-empty JSON array")
+              sys.exit(1)
+
+          print(f"\n⚾ Writing {len(picks)} Atropa picks for {date_str}...")
+
+          sheet = get_sheet()
+          ws    = get_or_create_tab(sheet)
+
+          for p in picks:
+              row = [
+                  date_str,
+                  p.get("matchup", ""),
+                  p.get("time", ""),
+                  p.get("type", ""),
+                  p.get("pick", ""),
+                  p.get("book", ""),
+                  p.get("proj", ""),
+                  "",         # Our Pick
+                  "",         # Our Proj
+                  "",         # Agreement
+                  "PENDING",  # Atropa W/L
+                  "PENDING",  # Our W/L
+              ]
+              ws.append_row(row)
+              print(f"   ✅ {p.get('matchup','?')} | {p.get('pick','?')} | {p.get('proj','?')}")
+
+          print(f"\n✅ Done — {len(picks)} rows written to '{ATROPA_TAB}'")
+          EOF
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
