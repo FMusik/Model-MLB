@@ -467,6 +467,7 @@ jobs:
 
               all_rows = ws_unified.get_all_values()
               updated = skipped = 0
+              all_updates = []  # accumulate all cell updates for single batch write
 
               for i, row in enumerate(all_rows[1:], start=2):
                   if len(row) <= COL_OUR_WL:
@@ -503,7 +504,6 @@ jobs:
                   faro_pick = row[COL_FARO_PICK].strip() if len(row) > COL_FARO_PICK else ""
                   if faro_pick and faro_wl in ("PENDING",""):
                       new_faro_wl = resolve_ml(faro_pick, away_score, home_score, game)
-                      ws_unified.update_cell(i, COL_FARO_WL + 1, new_faro_wl)
                   else:
                       new_faro_wl = faro_wl
 
@@ -511,15 +511,12 @@ jobs:
                   atr_pick = row[COL_ATR_PICK].strip() if len(row) > COL_ATR_PICK else ""
                   if atr_pick and atr_wl in ("PENDING",""):
                       new_atr_wl = resolve_ml(atr_pick, away_score, home_score, game) if pick_type == "ML" else resolve_total(atr_pick, away_score, home_score)
-                      ws_unified.update_cell(i, COL_ATR_WL + 1, new_atr_wl)
                   else:
                       new_atr_wl = atr_wl
 
                   # Always write Our Pick + Conf% regardless of W/L status
                   our_pick = t_data.get("our_pick","")
                   our_conf = t_data.get("our_conf","")
-                  ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
-                  ws_unified.update_cell(i, COL_OUR_CONF + 1, our_conf)
 
                   # Resolve Our W/L
                   if our_wl in ("PENDING",""):
@@ -529,13 +526,24 @@ jobs:
                           new_our_wl = resolve_ml(our_pick, away_score, home_score, game)
                       else:
                           new_our_wl = resolve_total(our_pick, away_score, home_score)
-                      ws_unified.update_cell(i, COL_OUR_WL + 1, new_our_wl)
                   else:
                       new_our_wl = our_wl
+
+                  # Accumulate updates for single batch write at end
+                  all_updates.append({"range": f"I{i}", "values": [[our_pick]]})
+                  all_updates.append({"range": f"J{i}", "values": [[our_conf]]})
+                  if our_wl in ("PENDING",""):
+                      all_updates.append({"range": f"M{i}", "values": [[new_our_wl]]})
+                  if faro_pick and faro_wl in ("PENDING",""):
+                      all_updates.append({"range": f"K{i}", "values": [[new_faro_wl]]})
+                  if atr_pick and atr_wl in ("PENDING",""):
+                      all_updates.append({"range": f"L{i}", "values": [[new_atr_wl]]})
 
                   updated += 1
                   print(f"   ✅ {game} | Faro: {new_faro_wl} | Atropa: {new_atr_wl} | Ours: {new_our_wl}")
 
+              if all_updates:
+                  ws_unified.batch_update(all_updates)
               print(f"\n📊 {updated} updated, {skipped} already settled")
 
           # ── SUMMARY (writes to sheet + prints to log) ─────────
@@ -666,6 +674,7 @@ jobs:
                   }
               all_rows = ws_unified.get_all_values()
               filled = 0
+              batch = []
               for i, row in enumerate(all_rows[1:], start=2):
                   if not row or len(row) <= COL_OUR_PICK: continue
                   game = row[COL_GAME].strip() if len(row) > COL_GAME else ""
@@ -674,10 +683,13 @@ jobs:
                   if not t_data: continue
                   our_pick = t_data.get("our_pick","")
                   our_conf = t_data.get("our_conf","")
-                  ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
-                  ws_unified.update_cell(i, COL_OUR_CONF + 1, our_conf)
+                  # Collect updates for batch write
+                  batch.append({"range": f"I{i}", "values": [[our_pick]]})
+                  batch.append({"range": f"J{i}", "values": [[our_conf]]})
                   filled += 1
                   print(f"   ✅ {date} {game} | Pick: {our_pick} | Conf: {our_conf}")
+              if batch:
+                  ws_unified.batch_update(batch)
               print(f"\n✅ Backfill done — {filled} rows updated")
 
           update_wl(sheet, ws_unified, date_str if not do_backfill else None)
