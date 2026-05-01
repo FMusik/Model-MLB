@@ -15,6 +15,10 @@ on:
         description: "Atropa picks JSON (paste from Claude) — leave [] to skip"
         required: false
         default: "[]"
+      backfill:
+        description: "Backfill Our Pick + Conf% for ALL rows from Tracker? (yes/no)"
+        required: false
+        default: "no"
       migrate:
         description: "Migrate existing Faro + Atropa tabs into unified tab? (yes/no)"
         required: false
@@ -45,6 +49,7 @@ jobs:
           FARO_JSON:   ${{ github.event.inputs.faro_json }}
           ATROPA_JSON: ${{ github.event.inputs.atropa_json }}
           MIGRATE:     ${{ github.event.inputs.migrate }}
+          BACKFILL:    ${{ github.event.inputs.backfill }}
         run: |
           python - <<'EOF'
           import os, json, sys, re, datetime, gspread
@@ -119,7 +124,6 @@ jobs:
               "KCR": "Kansas City Royals",
               "TBR": "Tampa Bay Rays",
               "SFG": "San Francisco Giants",
-              "ARI": "Arizona Diamondbacks",
           }
 
           def expand_abbrev(abbrev):
@@ -163,15 +167,12 @@ jobs:
           FULL_TO_ABBREV["MIAMI MARLINS"]         = "MIA"
           FULL_TO_ABBREV["PHILADELPHIA PHILLIES"] = "PHI"
           FULL_TO_ABBREV["ATLANTA BRAVES"]        = "ATL"
-          FULL_TO_ABBREV["NEW YORK METS"]         = "NYM"
           FULL_TO_ABBREV["PITTSBURGH PIRATES"]    = "PIT"
           FULL_TO_ABBREV["ST. LOUIS CARDINALS"]   = "STL"
           FULL_TO_ABBREV["MILWAUKEE BREWERS"]     = "MIL"
           FULL_TO_ABBREV["CINCINNATI REDS"]       = "CIN"
           FULL_TO_ABBREV["COLORADO ROCKIES"]      = "COL"
           FULL_TO_ABBREV["ARIZONA DIAMONDBACKS"]  = "ARI"
-          FULL_TO_ABBREV["MIAMI MARLINS"]         = "MIA"
-          FULL_TO_ABBREV["WASHINGTON NATIONALS"]  = "WSN"
 
           def normalize_game(game_str):
               """Normalize to ABBREV@ABBREV for reliable dedup matching."""
@@ -216,28 +217,28 @@ jobs:
               return keys
 
           # ── RESOLVE W/L ───────────────────────────────────────
-          def teams_from_game(game_str):
-              parts = re.split(r"[@]", game_str.upper())
-              if len(parts) == 2:
-                  return parts[0].strip(), parts[1].strip()
-              return None, None
-
           def resolve_ml(pick, away_score, home_score, game_str):
               try:
                   away_score, home_score = float(away_score), float(home_score)
               except (ValueError, TypeError):
                   return "PENDING"
-              away_team, home_team = teams_from_game(game_str)
-              pick_upper = pick.upper().replace(" ML","").strip()
-              # Match against abbreviations AND full names
-              away_abbrevs = [away_team] + [k for k,v in ABBREV_TO_FULL.items() if v.upper() == away_team]
-              home_abbrevs = [home_team] + [k for k,v in ABBREV_TO_FULL.items() if v.upper() == home_team]
-              if any(pick_upper in a for a in away_abbrevs):
+              # Normalize game and pick to abbrevs for reliable matching
+              norm_game = normalize_game(game_str)
+              parts     = norm_game.split("@")
+              if len(parts) != 2:
+                  print(f"   ⚠️  Can't parse game: '{game_str}'")
+                  return "PENDING"
+              away_abbrev = parts[0].strip()
+              home_abbrev = parts[1].strip()
+              # Normalize pick to abbrev too
+              pick_clean  = pick.upper().replace(" ML","").strip()
+              pick_abbrev = FULL_TO_ABBREV.get(pick_clean, pick_clean)
+              if pick_abbrev == away_abbrev:
                   won = away_score > home_score
-              elif any(pick_upper in h for h in home_abbrevs):
+              elif pick_abbrev == home_abbrev:
                   won = home_score > away_score
               else:
-                  print(f"   ⚠️  Can't match '{pick}' to '{game_str}'")
+                  print(f"   ⚠️  Can't match '{pick}' ({pick_abbrev}) to '{away_abbrev}@{home_abbrev}'")
                   return "PENDING"
               if away_score == home_score:
                   return "PUSH"
@@ -421,8 +422,9 @@ jobs:
               print(f"   📊 {written} new Atropa rows written")
 
           # ── UPDATE W/L FROM TRACKER ───────────────────────────
-          def update_wl(sheet, ws_unified, date_str):
-              print(f"\n🔄 Updating W/L for {date_str}...")
+          def update_wl(sheet, ws_unified, date_str=None):
+              label = date_str if date_str else "ALL dates"
+              print(f"\n🔄 Updating W/L for {label}...")
 
               ws_tracker   = sheet.worksheet(TRACKER_TAB)
               tracker_rows = ws_tracker.get_all_values()
@@ -444,7 +446,7 @@ jobs:
               away_act    = 19  # T = Actual Away
               home_act    = 20  # U = Actual Home
 
-              print(f"   📍 Using hardcoded Tracker cols — pick:C(2) prob:F(5) proj_total:L(11) away_actual:T(19) home_actual:U(20)")
+              print(f"   📍 Using hardcoded Tracker cols — pick:C(2) conf:E(4) away_actual:T(19) home_actual:U(20)")
 
               tracker_lookup = {}
               for row in tracker_rows[1:]:
@@ -467,7 +469,9 @@ jobs:
               updated = skipped = 0
 
               for i, row in enumerate(all_rows[1:], start=2):
-                  if len(row) <= COL_OUR_WL or row[COL_DATE] != date_str:
+                  if len(row) <= COL_OUR_WL:
+                      continue
+                  if date_str and row[COL_DATE] != date_str:
                       continue
 
                   faro_wl = row[COL_FARO_WL].strip() if len(row) > COL_FARO_WL else ""
@@ -481,7 +485,8 @@ jobs:
 
                   game      = row[COL_GAME].strip()
                   pick_type = row[COL_TYPE].strip()
-                  t_data    = tracker_lookup.get((date_str, normalize_game(game)))
+                  row_date  = row[COL_DATE].strip()
+                  t_data    = tracker_lookup.get((row_date, normalize_game(game)))
 
                   if not t_data:
                       print(f"   ⚠️  No tracker match: {game}")
@@ -490,7 +495,7 @@ jobs:
                   away_score = t_data["away_actual"]
                   home_score = t_data["home_actual"]
 
-                  if not away_score or not home_score:
+                  if away_score == "" or home_score == "":
                       print(f"   ⏳ {game} — actuals not in yet")
                       continue
 
@@ -545,14 +550,13 @@ jobs:
                   pct     = f"{wins/total*100:.1f}%" if total > 0 else "N/A"
                   return wins, losses, pct
 
-              # Rows where both Faro + Atropa picked and all are settled
+              # Rows where both Faro + Atropa picked and results are settled
               all_agree = [r for r in rows
                            if len(r) > COL_OUR_WL
                            and r[COL_FARO_PICK] and r[COL_ATR_PICK]
                            and r[COL_FARO_WL] not in ("","PENDING")
                            and r[COL_ATR_WL]  not in ("","PENDING")
-                           and r[COL_OUR_WL]  not in ("","PENDING","NO BET")
-                           and r[COL_FARO_WL] == r[COL_ATR_WL]]
+                           and r[COL_OUR_WL]  not in ("","PENDING","NO BET")]
 
               f_w, f_l, f_pct = record(COL_FARO_WL)
               a_w, a_l, a_pct = record(COL_ATR_WL)
@@ -632,7 +636,51 @@ jobs:
               print(f"\n⚾ Writing {len(atropa_picks)} Atropa picks...")
               write_atropa(sheet, ws_unified, atropa_picks, date_str)
 
-          update_wl(sheet, ws_unified, date_str)
+          do_backfill = os.environ.get("BACKFILL","no").strip().lower() == "yes"
+          if do_backfill:
+              print(f"\n🔁 Backfilling Our Pick + Conf% for ALL rows...")
+              ws_tracker   = sheet.worksheet(TRACKER_TAB)
+              tracker_rows = ws_tracker.get_all_values()
+              hdrs         = [h.strip() for h in tracker_rows[0]]
+              def _find_col(headers, *candidates):
+                  for c in candidates:
+                      for i, h in enumerate(headers):
+                          if c.lower() in h.lower():
+                              return i
+                  return None
+              date_col   = _find_col(hdrs, "date")
+              game_col   = _find_col(hdrs, "game", "matchup")
+              our_pick_c = 2   # C = Bet Type
+              our_conf_c = 4   # E = Conf%
+              tracker_lookup = {}
+              for row in tracker_rows[1:]:
+                  if not row: continue
+                  t_date = row[date_col].strip() if date_col is not None else ""
+                  t_game = row[game_col].strip() if game_col is not None else ""
+                  raw_pick  = row[our_pick_c].strip() if len(row) > our_pick_c else ""
+                  clean_pick = re.sub(r" (ML|RL[^a-zA-Z]*.*)$", "", raw_pick, flags=re.IGNORECASE).strip()
+                  our_conf  = row[our_conf_c].strip() if len(row) > our_conf_c else ""
+                  tracker_lookup[(t_date, normalize_game(t_game))] = {
+                      "our_pick": clean_pick,
+                      "our_conf": our_conf,
+                  }
+              all_rows = ws_unified.get_all_values()
+              filled = 0
+              for i, row in enumerate(all_rows[1:], start=2):
+                  if not row or len(row) <= COL_OUR_PICK: continue
+                  game = row[COL_GAME].strip() if len(row) > COL_GAME else ""
+                  date = row[COL_DATE].strip() if len(row) > COL_DATE else ""
+                  t_data = tracker_lookup.get((date, normalize_game(game)))
+                  if not t_data: continue
+                  our_pick = t_data.get("our_pick","")
+                  our_conf = t_data.get("our_conf","")
+                  ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
+                  ws_unified.update_cell(i, COL_OUR_CONF + 1, our_conf)
+                  filled += 1
+                  print(f"   ✅ {date} {game} | Pick: {our_pick} | Conf: {our_conf}")
+              print(f"\n✅ Backfill done — {filled} rows updated")
+
+          update_wl(sheet, ws_unified, date_str if not do_backfill else None)
           print_summary(ws_unified)
           EOF
 
