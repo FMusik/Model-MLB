@@ -311,13 +311,16 @@ jobs:
               ws_tracker   = sheet.worksheet(TRACKER_TAB)
               tracker_rows = ws_tracker.get_all_values()
 
+              print(f"   📋 Tracker headers: {tracker_rows[0][:6] if tracker_rows else 'EMPTY'}")
+              print(f"   📋 Tracker total rows: {len(tracker_rows)-1}")
+
               def bet_type_to_pick_type(bet_type):
                   b = bet_type.upper().strip()
                   if b.startswith("OVER") or b.startswith("UNDER"):
                       return "TOTAL"
                   if "ML" in b:
                       return "ML"
-                  return None  # NRFI, RL, etc — skip
+                  return None
 
               tracker_lookup = {}
               for row in tracker_rows[1:]:
@@ -331,17 +334,21 @@ jobs:
                   pick_type = bet_type_to_pick_type(raw_pick)
                   if not pick_type:
                       continue
-                  # Strip ML suffix for team name picks
                   if pick_type == "ML":
                       clean_pick = raw_pick.rsplit(" ML", 1)[0].strip() if raw_pick.upper().endswith(" ML") else raw_pick.strip()
                   else:
-                      clean_pick = raw_pick  # keep "OVER 8.5" as-is
+                      clean_pick = raw_pick
                   key = (t_date, normalize_game(t_game), pick_type)
                   tracker_lookup[key] = {
                       "our_pick": clean_pick,
                       "our_conf": our_conf,
                       "our_wl":   hit_miss,
                   }
+
+              print(f"   📦 Tracker lookup entries for {date_str}:")
+              for k, v in tracker_lookup.items():
+                  if k[0] == date_str:
+                      print(f"      {k} → conf:{v['our_conf']} wl:{v['our_wl']}")
 
               all_rows = ws_unified.get_all_values()
               updates  = []
@@ -354,7 +361,9 @@ jobs:
                       continue
                   game      = row[COL_GAME].strip()
                   pick_type = "TOTAL" if row[COL_TYPE].strip().upper() == "TOTAL" else "ML"
-                  t_data    = tracker_lookup.get((date_str, normalize_game(game), pick_type))
+                  lookup_key = (date_str, normalize_game(game), pick_type)
+                  print(f"   🔍 Looking up: {lookup_key}")
+                  t_data    = tracker_lookup.get(lookup_key)
                   if not t_data:
                       print(f"   ⚠️  No tracker match: {game} ({pick_type})")
                       continue
