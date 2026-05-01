@@ -311,18 +311,33 @@ jobs:
               ws_tracker   = sheet.worksheet(TRACKER_TAB)
               tracker_rows = ws_tracker.get_all_values()
 
+              def bet_type_to_pick_type(bet_type):
+                  b = bet_type.upper().strip()
+                  if b.startswith("OVER") or b.startswith("UNDER"):
+                      return "TOTAL"
+                  if "ML" in b:
+                      return "ML"
+                  return None  # NRFI, RL, etc — skip
+
               tracker_lookup = {}
               for row in tracker_rows[1:]:
                   if not row:
                       continue
-                  t_date    = row[TRK_DATE].strip()     if len(row) > TRK_DATE     else ""
-                  t_game    = row[TRK_GAME].strip()     if len(row) > TRK_GAME     else ""
-                  raw_pick  = row[TRK_PICK].strip()     if len(row) > TRK_PICK     else ""
-                  our_conf  = row[TRK_CONF].strip()     if len(row) > TRK_CONF     else ""
-                  hit_miss  = row[TRK_HIT_MISS].strip() if len(row) > TRK_HIT_MISS else ""
-                  # Strip ML/RL suffix: "Milwaukee Brewers ML" → "Milwaukee Brewers"
-                  clean_pick = re.sub(r"\s+(ML|RL[^a-zA-Z]*.*)$", "", raw_pick, flags=re.IGNORECASE).strip()
-                  tracker_lookup[(t_date, normalize_game(t_game))] = {
+                  t_date   = row[TRK_DATE].strip()     if len(row) > TRK_DATE     else ""
+                  t_game   = row[TRK_GAME].strip()     if len(row) > TRK_GAME     else ""
+                  raw_pick = row[TRK_PICK].strip()     if len(row) > TRK_PICK     else ""
+                  our_conf = row[TRK_CONF].strip()     if len(row) > TRK_CONF     else ""
+                  hit_miss = row[TRK_HIT_MISS].strip() if len(row) > TRK_HIT_MISS else ""
+                  pick_type = bet_type_to_pick_type(raw_pick)
+                  if not pick_type:
+                      continue
+                  # Strip ML suffix for team name picks
+                  if pick_type == "ML":
+                      clean_pick = raw_pick.rsplit(" ML", 1)[0].strip() if raw_pick.upper().endswith(" ML") else raw_pick.strip()
+                  else:
+                      clean_pick = raw_pick  # keep "OVER 8.5" as-is
+                  key = (t_date, normalize_game(t_game), pick_type)
+                  tracker_lookup[key] = {
                       "our_pick": clean_pick,
                       "our_conf": our_conf,
                       "our_wl":   hit_miss,
@@ -337,20 +352,22 @@ jobs:
                       continue
                   if row[COL_DATE] != date_str:
                       continue
-                  game   = row[COL_GAME].strip()
-                  t_data = tracker_lookup.get((date_str, normalize_game(game)))
+                  game      = row[COL_GAME].strip()
+                  pick_type = "TOTAL" if row[COL_TYPE].strip().upper() == "TOTAL" else "ML"
+                  t_data    = tracker_lookup.get((date_str, normalize_game(game), pick_type))
                   if not t_data:
-                      print(f"   ⚠️  No tracker match: {game}")
+                      print(f"   ⚠️  No tracker match: {game} ({pick_type})")
                       continue
                   updates.append({"range": f"H{i}", "values": [[t_data["our_pick"]]]})
                   updates.append({"range": f"I{i}", "values": [[t_data["our_conf"]]]})
                   updates.append({"range": f"L{i}", "values": [[t_data["our_wl"]]]})
                   updated += 1
-                  print(f"   ✅ {game} | Pick: {t_data['our_pick']} | Conf: {t_data['our_conf']} | W/L: {t_data['our_wl']}")
+                  print(f"   ✅ {game} ({pick_type}) | Pick: {t_data['our_pick']} | Conf: {t_data['our_conf']} | W/L: {t_data['our_wl']}")
 
               if updates:
                   ws_unified.batch_update(updates)
               print(f"\n📊 {updated} rows updated from Tracker")
+
 
           # ── WRITE SUMMARY TO SHEET ─────────────────────────────
           def write_summary(ws_unified):
