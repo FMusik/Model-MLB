@@ -115,6 +115,10 @@ jobs:
               "TOR": "Toronto Blue Jays",
               "WSN": "Washington Nationals",
               "WSH": "Washington Nationals",
+              "KCR": "Kansas City Royals",
+              "TBR": "Tampa Bay Rays",
+              "SFG": "San Francisco Giants",
+              "ARI": "Arizona Diamondbacks",
           }
 
           def expand_abbrev(abbrev):
@@ -160,8 +164,12 @@ jobs:
               try:
                   ws = sheet.worksheet(UNIFIED_TAB)
                   print(f"📋 Found tab: {UNIFIED_TAB}")
+                  # Expand columns if needed for summary block in cols P-S
+                  if ws.col_count < 20:
+                      ws.add_cols(20 - ws.col_count)
+                      print(f"   📐 Expanded tab to 20 columns")
               except gspread.WorksheetNotFound:
-                  ws = sheet.add_worksheet(title=UNIFIED_TAB, rows=1000, cols=len(HEADERS))
+                  ws = sheet.add_worksheet(title=UNIFIED_TAB, rows=1000, cols=20)
                   ws.append_row(HEADERS)
                   print(f"✅ Created tab: {UNIFIED_TAB}")
               return ws
@@ -398,8 +406,10 @@ jobs:
               game_col   = find_col(hdrs, "game", "matchup")
               away_act   = find_col(hdrs, "actual away", "away score")
               home_act   = find_col(hdrs, "actual home", "home score")
-              our_pick_c = find_col(hdrs, "our pick", "pick")
-              our_proj_c = find_col(hdrs, "our proj", "proj score")
+              our_pick_c = find_col(hdrs, "bet type", "our pick", "pick")
+              our_proj_c = find_col(hdrs, "our proj away", "our proj", "proj score")
+
+              print(f"   📍 Tracker cols — date:{date_col} game:{game_col} away_act:{away_act} home_act:{home_act} our_pick:{our_pick_c} our_proj:{our_proj_c}")
 
               tracker_lookup = {}
               for row in tracker_rows[1:]:
@@ -407,10 +417,13 @@ jobs:
                       continue
                   t_date = row[date_col].strip() if date_col is not None else ""
                   t_game = row[game_col].strip() if game_col is not None else ""
+                  raw_pick  = row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else ""
+                  # Strip ML/RL suffixes from Bet Type: "Milwaukee Brewers ML" -> "Milwaukee Brewers"
+                  clean_pick = re.sub(r" (ML|RL[^a-zA-Z]*.*)$", "", raw_pick, flags=re.IGNORECASE).strip()
                   tracker_lookup[(t_date, normalize_game(t_game))] = {
                       "away_actual": row[away_act].strip()   if away_act   is not None and len(row) > away_act   else "",
                       "home_actual": row[home_act].strip()   if home_act   is not None and len(row) > home_act   else "",
-                      "our_pick":    row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else "",
+                      "our_pick":    clean_pick,
                       "our_proj":    row[our_proj_c].strip() if our_proj_c is not None and len(row) > our_proj_c else "",
                   }
 
