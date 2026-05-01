@@ -58,7 +58,7 @@ jobs:
           TRACKER_TAB = "📊 Tracker"
 
           HEADERS = [
-              "Date", "Game", "Time", "Type",
+              "Date", "Game", "Type",
               "Faro Pick", "Faro Conf%",
               "Atropa Pick", "Atropa Book", "Atropa Proj",
               "Our Pick", "Our Proj",
@@ -68,18 +68,17 @@ jobs:
           # Column indices (0-based)
           COL_DATE       = 0
           COL_GAME       = 1
-          COL_TIME       = 2
-          COL_TYPE       = 3
-          COL_FARO_PICK  = 4
-          COL_FARO_CONF  = 5
-          COL_ATR_PICK   = 6
-          COL_ATR_BOOK   = 7
-          COL_ATR_PROJ   = 8
-          COL_OUR_PICK   = 9
-          COL_OUR_PROJ   = 10
-          COL_FARO_WL    = 11
-          COL_ATR_WL     = 12
-          COL_OUR_WL     = 13
+          COL_TYPE       = 2
+          COL_FARO_PICK  = 3
+          COL_FARO_CONF  = 4
+          COL_ATR_PICK   = 5
+          COL_ATR_BOOK   = 6
+          COL_ATR_PROJ   = 7
+          COL_OUR_PICK   = 8
+          COL_OUR_PROJ   = 9
+          COL_FARO_WL    = 10
+          COL_ATR_WL     = 11
+          COL_OUR_WL     = 12
 
           # ── TEAM NAME MAPS ────────────────────────────────────
           # Abbrev → Full name (covers Atropa abbreviations)
@@ -246,7 +245,6 @@ jobs:
                       new_row = [""] * len(HEADERS)
                       new_row[COL_DATE]      = date_str
                       new_row[COL_GAME]      = game
-                      new_row[COL_TIME]      = ""
                       new_row[COL_TYPE]      = "ML"
                       new_row[COL_FARO_PICK] = faro_pick
                       new_row[COL_FARO_CONF] = faro_conf
@@ -272,7 +270,6 @@ jobs:
                           continue
                       date_str  = row[0].strip()
                       matchup   = row[1].strip()
-                      time_str  = row[2].strip()
                       pick_type = row[3].strip()
                       atr_pick  = row[4].strip()
                       atr_book  = row[5].strip() if len(row) > 5 else ""
@@ -290,7 +287,6 @@ jobs:
                       new_row = [""] * len(HEADERS)
                       new_row[COL_DATE]     = date_str
                       new_row[COL_GAME]     = game_full
-                      new_row[COL_TIME]     = time_str
                       new_row[COL_TYPE]     = pick_type
                       new_row[COL_ATR_PICK] = atr_pick_full
                       new_row[COL_ATR_BOOK] = atr_book
@@ -330,7 +326,6 @@ jobs:
                   new_row = [""] * len(HEADERS)
                   new_row[COL_DATE]      = date_str
                   new_row[COL_GAME]      = game
-                  new_row[COL_TIME]      = ""
                   new_row[COL_TYPE]      = "ML"
                   new_row[COL_FARO_PICK] = faro_pick
                   new_row[COL_FARO_CONF] = str(faro_conf)
@@ -350,7 +345,6 @@ jobs:
               for p in picks:
                   matchup   = p.get("matchup", "")
                   game_full = expand_matchup(matchup)
-                  time_str  = p.get("time", "")
                   pick_type = p.get("type", "ML")
                   atr_pick  = expand_abbrev(p.get("pick", ""))
                   atr_book  = p.get("book", "")
@@ -372,7 +366,6 @@ jobs:
                   new_row = [""] * len(HEADERS)
                   new_row[COL_DATE]     = date_str
                   new_row[COL_GAME]     = game_full
-                  new_row[COL_TIME]     = time_str
                   new_row[COL_TYPE]     = pick_type
                   new_row[COL_ATR_PICK] = atr_pick
                   new_row[COL_ATR_BOOK] = atr_book
