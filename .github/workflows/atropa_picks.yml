@@ -68,18 +68,22 @@ jobs:
                   print(f"✅ Created tab: {ATROPA_TAB}")
               return ws
 
-          # ── Parse inputs ──
           date_str  = os.environ.get("ATROPA_DATE", "").strip()
           picks_raw = os.environ.get("ATROPA_PICKS", "[]").strip()
 
           if not date_str:
               date_str = datetime.date.today().isoformat()
 
+          print(f"Raw JSON preview: {picks_raw[:120]}")
+
           try:
               picks = json.loads(picks_raw)
           except json.JSONDecodeError as e:
               print(f"❌ Invalid JSON: {e}")
               sys.exit(1)
+
+          if isinstance(picks, list) and len(picks) == 1 and isinstance(picks[0], list):
+              picks = picks[0]
 
           if not isinstance(picks, list) or len(picks) == 0:
               print("❌ picks_json must be a non-empty JSON array")
@@ -90,8 +94,19 @@ jobs:
           sheet = get_sheet()
           ws    = get_or_create_tab(sheet)
 
+          existing      = ws.get_all_values()
+          existing_keys = set()
+          for row in existing[1:]:
+              if len(row) >= 5:
+                  existing_keys.add((row[0], row[1].upper(), row[4].upper()))
+
+          written = 0
           for p in picks:
-              row = [
+              key = (date_str, p.get("matchup","").upper(), p.get("pick","").upper())
+              if key in existing_keys:
+                  print(f"   ⏭️  Already logged: {p.get('matchup')} | {p.get('pick')} — skipping")
+                  continue
+              ws.append_row([
                   date_str,
                   p.get("matchup", ""),
                   p.get("time", ""),
@@ -99,16 +114,191 @@ jobs:
                   p.get("pick", ""),
                   p.get("book", ""),
                   p.get("proj", ""),
-                  "",         # Our Pick
-                  "",         # Our Proj
-                  "",         # Agreement
-                  "PENDING",  # Atropa W/L
-                  "PENDING",  # Our W/L
-              ]
-              ws.append_row(row)
+                  "", "", "",     # Our Pick, Our Proj, Agreement
+                  "PENDING",      # Atropa W/L
+                  "PENDING",      # Our W/L
+              ])
+              written += 1
               print(f"   ✅ {p.get('matchup','?')} | {p.get('pick','?')} | {p.get('proj','?')}")
 
-          print(f"\n✅ Done — {len(picks)} rows written to '{ATROPA_TAB}'")
+          print(f"\n✅ {written} new rows written to '{ATROPA_TAB}'")
+          EOF
+
+      - name: Update Atropa W/L from Tracker
+        env:
+          ATROPA_DATE: ${{ github.event.inputs.date }}
+        run: |
+          python - <<'EOF'
+          import os, sys, re, datetime, gspread
+          from google.oauth2.service_account import Credentials
+
+          SHEET_URL   = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
+          ATROPA_TAB  = "📸 Atropa vs Model"
+          TRACKER_TAB = "📊 Tracker"
+          COL_DATE      = 0
+          COL_GAME      = 1
+          COL_TYPE      = 3
+          COL_PICK      = 4
+          COL_ATROPA_WL = 10
+          COL_OUR_WL    = 11
+
+          def get_sheet():
+              scopes = [
+                  "https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive",
+              ]
+              creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+              gc    = gspread.authorize(creds)
+              return gc.open_by_url(SHEET_URL)
+
+          def teams_from_matchup(matchup):
+              parts = re.split(r"[@]", matchup.upper())
+              return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else (None, None)
+
+          def resolve_ml(pick, away_score, home_score, matchup):
+              try:
+                  away_score, home_score = float(away_score), float(home_score)
+              except (ValueError, TypeError):
+                  return "PENDING"
+              away_team, home_team = teams_from_matchup(matchup)
+              pick_team = pick.upper().replace(" ML", "").strip()
+              if away_team and pick_team in away_team:
+                  won = away_score > home_score
+              elif home_team and pick_team in home_team:
+                  won = home_score > away_score
+              else:
+                  print(f"   ⚠️  Can't match '{pick}' to '{matchup}'")
+                  return "PENDING"
+              if away_score == home_score:
+                  return "PUSH"
+              return "WIN" if won else "LOSS"
+
+          def resolve_total(pick, away_score, home_score):
+              try:
+                  away_score, home_score = float(away_score), float(home_score)
+              except (ValueError, TypeError):
+                  return "PENDING"
+              actual = away_score + home_score
+              m = re.match(r"([OU])(\d+\.?\d*)", pick.upper().replace("OVER","O").replace("UNDER","U"))
+              if not m:
+                  return "PENDING"
+              direction, line = m.group(1), float(m.group(2))
+              if actual == line:
+                  return "PUSH"
+              return "WIN" if (direction == "O" and actual > line) or (direction == "U" and actual < line) else "LOSS"
+
+          def find_col(headers, *candidates):
+              for c in candidates:
+                  for i, h in enumerate(headers):
+                      if c.lower() in h.lower():
+                          return i
+              return None
+
+          date_str = os.environ.get("ATROPA_DATE", "").strip() or datetime.date.today().isoformat()
+          print(f"\n🔄 Updating Atropa W/L for {date_str}...")
+
+          sheet      = get_sheet()
+          ws_atropa  = sheet.worksheet(ATROPA_TAB)
+          ws_tracker = sheet.worksheet(TRACKER_TAB)
+
+          tracker_rows = ws_tracker.get_all_values()
+          hdrs         = [h.strip() for h in tracker_rows[0]]
+          date_col     = find_col(hdrs, "date")
+          game_col     = find_col(hdrs, "game", "matchup")
+          away_act     = find_col(hdrs, "actual away", "away score")
+          home_act     = find_col(hdrs, "actual home", "home score")
+          our_pick_c   = find_col(hdrs, "our pick", "pick")
+
+          tracker_lookup = {}
+          for row in tracker_rows[1:]:
+              if not row:
+                  continue
+              t_date = row[date_col].strip() if date_col is not None else ""
+              t_game = row[game_col].strip() if game_col is not None else ""
+              tracker_lookup[(t_date, t_game.upper())] = {
+                  "away_actual": row[away_act].strip()   if away_act   is not None and len(row) > away_act   else "",
+                  "home_actual": row[home_act].strip()   if home_act   is not None and len(row) > home_act   else "",
+                  "our_pick":    row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else "",
+              }
+
+          atropa_rows      = ws_atropa.get_all_values()
+          updated = skipped = 0
+
+          for i, row in enumerate(atropa_rows[1:], start=2):
+              if len(row) <= COL_OUR_WL or row[COL_DATE] != date_str:
+                  continue
+              if row[COL_ATROPA_WL] not in ("PENDING","") and row[COL_OUR_WL] not in ("PENDING",""):
+                  skipped += 1
+                  continue
+
+              matchup   = row[COL_GAME].strip()
+              pick_type = row[COL_TYPE].strip()
+              pick      = row[COL_PICK].strip()
+              t_data    = tracker_lookup.get((date_str, matchup.upper()))
+
+              if not t_data:
+                  print(f"   ⚠️  No tracker match for {matchup} — staying PENDING")
+                  continue
+
+              away_score = t_data["away_actual"]
+              home_score = t_data["home_actual"]
+
+              if not away_score or not home_score:
+                  print(f"   ⏳ {matchup} — actuals not in yet")
+                  continue
+
+              new_atropa_wl = resolve_ml(pick, away_score, home_score, matchup) if pick_type == "ML" else resolve_total(pick, away_score, home_score)
+              our_pick      = t_data.get("our_pick", "")
+              new_our_wl    = "NO BET" if not our_pick else (resolve_ml(our_pick, away_score, home_score, matchup) if pick_type == "ML" else resolve_total(our_pick, away_score, home_score))
+
+              ws_atropa.update_cell(i, COL_ATROPA_WL + 1, new_atropa_wl)
+              ws_atropa.update_cell(i, COL_OUR_WL    + 1, new_our_wl)
+              updated += 1
+              print(f"   ✅ {matchup} | {pick} | Atropa: {new_atropa_wl} | Ours: {new_our_wl}")
+
+          print(f"\n📊 {updated} updated, {skipped} already settled")
+          EOF
+
+      - name: Print cumulative summary
+        run: |
+          python - <<'EOF'
+          import gspread
+          from google.oauth2.service_account import Credentials
+
+          SHEET_URL  = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
+          ATROPA_TAB = "📸 Atropa vs Model"
+          COL_ATROPA_WL = 10
+          COL_OUR_WL    = 11
+
+          scopes = [
+              "https://spreadsheets.google.com/feeds",
+              "https://www.googleapis.com/auth/drive",
+          ]
+          creds   = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+          gc      = gspread.authorize(creds)
+          ws      = gc.open_by_url(SHEET_URL).worksheet(ATROPA_TAB)
+          rows    = ws.get_all_values()
+
+          settled = [r for r in rows[1:]
+                     if len(r) > COL_OUR_WL
+                     and r[COL_ATROPA_WL] not in ("PENDING","")
+                     and r[COL_OUR_WL]    not in ("PENDING","")]
+
+          if not settled:
+              print("No settled picks yet.")
+          else:
+              a_wins = sum(1 for r in settled if r[COL_ATROPA_WL] == "WIN")
+              a_loss = sum(1 for r in settled if r[COL_ATROPA_WL] == "LOSS")
+              o_wins = sum(1 for r in settled if r[COL_OUR_WL]    == "WIN")
+              o_loss = sum(1 for r in settled if r[COL_OUR_WL]    == "LOSS")
+              total  = len(settled)
+              print(f"\n📈 ATROPA vs MODEL — CUMULATIVE")
+              print(f"{'='*40}")
+              print(f"  {'Model':<20} {'W':>4} {'L':>4} {'Win%':>7}")
+              print(f"  {'-'*35}")
+              print(f"  {'Atropa':<20} {a_wins:>4} {a_loss:>4} {a_wins/total*100:>6.1f}%")
+              print(f"  {'Our Model':<20} {o_wins:>4} {o_loss:>4} {o_wins/total*100:>6.1f}%")
+              print(f"\n  Comparable picks: {total}")
           EOF
 
       - name: Cleanup credentials
