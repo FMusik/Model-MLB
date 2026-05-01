@@ -480,7 +480,7 @@ jobs:
 
               print(f"\n📊 {updated} updated, {skipped} already settled")
 
-          # ── PRINT SUMMARY ─────────────────────────────────────
+          # ── SUMMARY (writes to sheet + prints to log) ─────────
           def print_summary(ws_unified):
               rows = ws_unified.get_all_values()[1:]
 
@@ -492,20 +492,24 @@ jobs:
                   pct     = f"{wins/total*100:.1f}%" if total > 0 else "N/A"
                   return wins, losses, pct
 
-              # Agreement rows
+              # Rows where both Faro + Atropa picked and all are settled
               all_agree = [r for r in rows
                            if len(r) > COL_OUR_WL
-                           and r[COL_FARO_WL] == r[COL_ATR_WL] == r[COL_OUR_WL] == "WIN"
-                           or (r[COL_FARO_WL] not in ("","PENDING") and r[COL_ATR_WL] not in ("","PENDING") and r[COL_OUR_WL] not in ("","PENDING","NO BET")
-                               and r[COL_FARO_PICK] and r[COL_ATR_PICK])]
+                           and r[COL_FARO_PICK] and r[COL_ATR_PICK]
+                           and r[COL_FARO_WL] not in ("","PENDING")
+                           and r[COL_ATR_WL]  not in ("","PENDING")
+                           and r[COL_OUR_WL]  not in ("","PENDING","NO BET")
+                           and r[COL_FARO_WL] == r[COL_ATR_WL]]
 
               f_w, f_l, f_pct = record(COL_FARO_WL)
               a_w, a_l, a_pct = record(COL_ATR_WL)
               o_w, o_l, o_pct = record(COL_OUR_WL)
 
-              agree_wins = sum(1 for r in all_agree if r[COL_OUR_WL] == "WIN")
+              agree_wins  = sum(1 for r in all_agree if r[COL_OUR_WL] == "WIN")
               agree_total = len(all_agree)
+              agree_pct   = f"{agree_wins/agree_total*100:.1f}%" if agree_total > 0 else "N/A"
 
+              # ── Print to Actions log ──
               print(f"\n📈 CAPPERS vs MODEL — CUMULATIVE SUMMARY")
               print(f"{'='*48}")
               print(f"  {'Model':<22} {'W':>4} {'L':>4} {'Win%':>7}")
@@ -513,9 +517,27 @@ jobs:
               print(f"  {'Faro':<22} {f_w:>4} {f_l:>4} {f_pct:>7}")
               print(f"  {'Atropa':<22} {a_w:>4} {a_l:>4} {a_pct:>7}")
               print(f"  {'Our Model':<22} {o_w:>4} {o_l:>4} {o_pct:>7}")
-              if agree_total > 0:
-                  print(f"  {'Faro+Atropa Agree':<22} {agree_wins:>4} {agree_total-agree_wins:>4} {agree_wins/agree_total*100:>6.1f}%")
+              print(f"  {'Faro+Atropa Agree':<22} {agree_wins:>4} {agree_total-agree_wins:>4} {agree_pct:>7}")
               print(f"{'='*48}")
+
+              # ── Write to sheet (col P = index 15, 1-based col 16) ──
+              # Summary lives in cols P:S rows 1-10, always overwritten
+              SUMMARY_COL = 16   # col P (1-based)
+              last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+              summary_block = [
+                  ["📊 CAPPERS vs MODEL SUMMARY", "", "", ""],
+                  [f"Updated: {last_updated}", "", "", ""],
+                  [""],
+                  ["Model", "W", "L", "Win%"],
+                  ["Faro",              f_w, f_l, f_pct],
+                  ["Atropa",            a_w, a_l, a_pct],
+                  ["Our Model",         o_w, o_l, o_pct],
+                  ["Faro+Atropa Agree", agree_wins, agree_total - agree_wins, agree_pct],
+              ]
+              for row_idx, row_data in enumerate(summary_block, start=1):
+                  for col_offset, val in enumerate(row_data):
+                      ws_unified.update_cell(row_idx, SUMMARY_COL + col_offset, val)
+              print(f"   ✅ Summary written to sheet cols P-S")
 
           # ── MAIN ──────────────────────────────────────────────
           date_str    = os.environ.get("RUN_DATE","").strip() or datetime.date.today().isoformat()
