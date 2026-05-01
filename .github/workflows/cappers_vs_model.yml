@@ -132,9 +132,20 @@ jobs:
                   return f"{away} @ {home}"
               return matchup
 
+          # Reverse map: full name → abbrev for normalization
+          FULL_TO_ABBREV = {v.upper(): k for k, v in ABBREV_TO_FULL.items()}
+          FULL_TO_ABBREV["SAN DIEGO PADRES"]    = "SDP"
+          FULL_TO_ABBREV["WASHINGTON NATIONALS"] = "WSN"
+
           def normalize_game(game_str):
-              """Normalize game string for dedup matching."""
-              return game_str.upper().replace(" @ ", "@").replace(" VS ", "@").strip()
+              """Normalize to ABBREV@ABBREV for reliable dedup matching."""
+              normalized = game_str.upper().replace(" @ ", "@").replace(" VS ", "@").strip()
+              parts = normalized.split("@")
+              if len(parts) == 2:
+                  away = FULL_TO_ABBREV.get(parts[0].strip(), parts[0].strip())
+                  home = FULL_TO_ABBREV.get(parts[1].strip(), parts[1].strip())
+                  return f"{away}@{home}"
+              return normalized
 
           # ── SHEETS AUTH ───────────────────────────────────────
           def get_sheet():
