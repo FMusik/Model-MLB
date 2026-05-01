@@ -1,0 +1,164 @@
+name: Cappers Repair Abbreviations
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repair-abbrevs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install gspread google-auth
+
+      - name: Write credentials file
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Repair abbreviations in sheet
+        run: |
+          python - <<'EOF'
+          import re, gspread
+          from google.oauth2.service_account import Credentials
+
+          SHEET_URL   = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
+          UNIFIED_TAB = "📊 Cappers vs Model"
+
+          ABBREV_TO_FULL = {
+              "ARI": "Arizona Diamondbacks",
+              "ATL": "Atlanta Braves",
+              "BAL": "Baltimore Orioles",
+              "BOS": "Boston Red Sox",
+              "CHC": "Chicago Cubs",
+              "CWS": "Chicago White Sox",
+              "CIN": "Cincinnati Reds",
+              "CLE": "Cleveland Guardians",
+              "COL": "Colorado Rockies",
+              "DET": "Detroit Tigers",
+              "HOU": "Houston Astros",
+              "KC":  "Kansas City Royals",
+              "KCR": "Kansas City Royals",
+              "LAA": "Los Angeles Angels",
+              "LAD": "Los Angeles Dodgers",
+              "MIA": "Miami Marlins",
+              "MIL": "Milwaukee Brewers",
+              "MIN": "Minnesota Twins",
+              "NYM": "New York Mets",
+              "NYY": "New York Yankees",
+              "OAK": "Athletics",
+              "ATH": "Athletics",
+              "PHI": "Philadelphia Phillies",
+              "PIT": "Pittsburgh Pirates",
+              "SD":  "San Diego Padres",
+              "SDP": "San Diego Padres",
+              "SEA": "Seattle Mariners",
+              "SF":  "San Francisco Giants",
+              "SFG": "San Francisco Giants",
+              "STL": "St. Louis Cardinals",
+              "TB":  "Tampa Bay Rays",
+              "TBR": "Tampa Bay Rays",
+              "TEX": "Texas Rangers",
+              "TOR": "Toronto Blue Jays",
+              "WSN": "Washington Nationals",
+              "WSH": "Washington Nationals",
+          }
+
+          # Build pattern to detect abbreviations (2-3 uppercase letters)
+          ABBREV_PATTERN = re.compile(r"^([A-Z]{2,3})@([A-Z]{2,3})$")
+
+          def expand_abbrev(val):
+              """Expand a single abbreviation, stripping ML suffix first."""
+              clean = val.upper().replace(" ML", "").strip()
+              return ABBREV_TO_FULL.get(clean, None)
+
+          def expand_game(game_str):
+              """
+              If game string is ABBREV@ABBREV format, expand both sides.
+              If already full names, return None (no change needed).
+              """
+              m = ABBREV_PATTERN.match(game_str.strip().upper())
+              if not m:
+                  # Check if either side of @ is still an abbreviation
+                  parts = game_str.replace(" @ ", "@").split("@")
+                  if len(parts) != 2:
+                      return None
+                  away_full = ABBREV_TO_FULL.get(parts[0].strip().upper())
+                  home_full = ABBREV_TO_FULL.get(parts[1].strip().upper())
+                  if away_full or home_full:
+                      away = away_full or parts[0].strip()
+                      home = home_full or parts[1].strip()
+                      return f"{away} @ {home}"
+                  return None
+
+              away = ABBREV_TO_FULL.get(m.group(1), m.group(1))
+              home = ABBREV_TO_FULL.get(m.group(2), m.group(2))
+              return f"{away} @ {home}"
+
+          def expand_pick(pick_str):
+              """
+              If pick is ABBREV ML or just ABBREV, expand to full name.
+              If already full name, return None (no change needed).
+              """
+              if not pick_str.strip():
+                  return None
+              # Already looks like a full name (has spaces, not just abbrev)
+              clean = pick_str.strip().upper().replace(" ML", "").strip()
+              if " " in clean and not ABBREV_TO_FULL.get(clean):
+                  return None  # already full name
+              expanded = ABBREV_TO_FULL.get(clean)
+              if expanded and expanded.upper() != pick_str.strip().upper():
+                  return expanded
+              return None
+
+          # ── Auth ──────────────────────────────────────────────
+          scopes = [
+              "https://spreadsheets.google.com/feeds",
+              "https://www.googleapis.com/auth/drive",
+          ]
+          creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+          gc    = gspread.authorize(creds)
+          ws    = gc.open_by_url(SHEET_URL).worksheet(UNIFIED_TAB)
+
+          # Col indices (0-based): Game=1, Atropa Pick=5
+          COL_GAME     = 2   # 1-based for update_cell
+          COL_ATR_PICK = 6   # 1-based for update_cell
+
+          all_rows = ws.get_all_values()
+          print(f"📋 Scanning {len(all_rows)-1} rows...")
+
+          fixed_game = 0
+          fixed_pick = 0
+
+          for i, row in enumerate(all_rows[1:], start=2):
+              if not row:
+                  continue
+
+              # Fix Game column
+              game = row[COL_GAME - 1] if len(row) >= COL_GAME else ""
+              new_game = expand_game(game)
+              if new_game and new_game != game:
+                  ws.update_cell(i, COL_GAME, new_game)
+                  print(f"   🔧 Row {i} Game: '{game}' → '{new_game}'")
+                  fixed_game += 1
+
+              # Fix Atropa Pick column
+              pick = row[COL_ATR_PICK - 1] if len(row) >= COL_ATR_PICK else ""
+              new_pick = expand_pick(pick)
+              if new_pick and new_pick != pick:
+                  ws.update_cell(i, COL_ATR_PICK, new_pick)
+                  print(f"   🔧 Row {i} Atropa Pick: '{pick}' → '{new_pick}'")
+                  fixed_pick += 1
+
+          print(f"\n✅ Done — {fixed_game} Game cells fixed, {fixed_pick} Atropa Pick cells fixed")
+          EOF
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
