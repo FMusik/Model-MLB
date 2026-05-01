@@ -1,0 +1,562 @@
+name: Cappers vs Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date of picks (YYYY-MM-DD)"
+        required: true
+        default: ""
+      faro_json:
+        description: "Faro picks JSON (paste from Claude) — leave [] to skip"
+        required: false
+        default: "[]"
+      atropa_json:
+        description: "Atropa picks JSON (paste from Claude) — leave [] to skip"
+        required: false
+        default: "[]"
+      migrate:
+        description: "Migrate existing Faro + Atropa tabs into unified tab? (yes/no)"
+        required: false
+        default: "no"
+
+jobs:
+  cappers-vs-model:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install gspread google-auth
+
+      - name: Write credentials file
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run cappers logger
+        env:
+          RUN_DATE:    ${{ github.event.inputs.date }}
+          FARO_JSON:   ${{ github.event.inputs.faro_json }}
+          ATROPA_JSON: ${{ github.event.inputs.atropa_json }}
+          MIGRATE:     ${{ github.event.inputs.migrate }}
+        run: |
+          python - <<'EOF'
+          import os, json, sys, re, datetime, gspread
+          from google.oauth2.service_account import Credentials
+
+          # ── CONFIG ─────────────────────────────────────────────
+          SHEET_URL   = "https://docs.google.com/spreadsheets/d/11mgGrwt8ZTNSXlMXk3mTctUOLoU7_4Y8pfiQ2RHYVGc/edit"
+          UNIFIED_TAB = "📊 Cappers vs Model"
+          FARO_TAB    = "🏟️ Faro vs Model"
+          ATROPA_TAB  = "📸 Atropa vs Model"
+          TRACKER_TAB = "📊 Tracker"
+
+          HEADERS = [
+              "Date", "Game", "Time", "Type",
+              "Faro Pick", "Faro Conf%",
+              "Atropa Pick", "Atropa Book", "Atropa Proj",
+              "Our Pick", "Our Proj",
+              "Faro W/L", "Atropa W/L", "Our W/L",
+          ]
+
+          # Column indices (0-based)
+          COL_DATE       = 0
+          COL_GAME       = 1
+          COL_TIME       = 2
+          COL_TYPE       = 3
+          COL_FARO_PICK  = 4
+          COL_FARO_CONF  = 5
+          COL_ATR_PICK   = 6
+          COL_ATR_BOOK   = 7
+          COL_ATR_PROJ   = 8
+          COL_OUR_PICK   = 9
+          COL_OUR_PROJ   = 10
+          COL_FARO_WL    = 11
+          COL_ATR_WL     = 12
+          COL_OUR_WL     = 13
+
+          # ── TEAM NAME MAPS ────────────────────────────────────
+          # Abbrev → Full name (covers Atropa abbreviations)
+          ABBREV_TO_FULL = {
+              "ARI": "Arizona Diamondbacks",
+              "ATL": "Atlanta Braves",
+              "BAL": "Baltimore Orioles",
+              "BOS": "Boston Red Sox",
+              "CHC": "Chicago Cubs",
+              "CWS": "Chicago White Sox",
+              "CIN": "Cincinnati Reds",
+              "CLE": "Cleveland Guardians",
+              "COL": "Colorado Rockies",
+              "DET": "Detroit Tigers",
+              "HOU": "Houston Astros",
+              "KC":  "Kansas City Royals",
+              "LAA": "Los Angeles Angels",
+              "LAD": "Los Angeles Dodgers",
+              "MIA": "Miami Marlins",
+              "MIL": "Milwaukee Brewers",
+              "MIN": "Minnesota Twins",
+              "NYM": "New York Mets",
+              "NYY": "New York Yankees",
+              "OAK": "Oakland Athletics",
+              "PHI": "Philadelphia Phillies",
+              "PIT": "Pittsburgh Pirates",
+              "SD":  "San Diego Padres",
+              "SDP": "San Diego Padres",
+              "SEA": "Seattle Mariners",
+              "SF":  "San Francisco Giants",
+              "STL": "St. Louis Cardinals",
+              "TB":  "Tampa Bay Rays",
+              "TEX": "Texas Rangers",
+              "TOR": "Toronto Blue Jays",
+              "WSN": "Washington Nationals",
+              "WSH": "Washington Nationals",
+          }
+
+          def expand_abbrev(abbrev):
+              """CWS → Chicago White Sox, CWS ML → Chicago White Sox"""
+              clean = abbrev.upper().replace(" ML", "").strip()
+              return ABBREV_TO_FULL.get(clean, abbrev)
+
+          def expand_matchup(matchup):
+              """CWS@SDP → Chicago White Sox @ San Diego Padres"""
+              parts = re.split(r"[@]", matchup.upper())
+              if len(parts) == 2:
+                  away = ABBREV_TO_FULL.get(parts[0].strip(), parts[0].strip())
+                  home = ABBREV_TO_FULL.get(parts[1].strip(), parts[1].strip())
+                  return f"{away} @ {home}"
+              return matchup
+
+          def normalize_game(game_str):
+              """Normalize game string for dedup matching."""
+              return game_str.upper().replace(" @ ", "@").replace(" VS ", "@").strip()
+
+          # ── SHEETS AUTH ───────────────────────────────────────
+          def get_sheet():
+              scopes = [
+                  "https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive",
+              ]
+              creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+              gc    = gspread.authorize(creds)
+              return gc.open_by_url(SHEET_URL)
+
+          def get_or_create_tab(sheet):
+              try:
+                  ws = sheet.worksheet(UNIFIED_TAB)
+                  print(f"📋 Found tab: {UNIFIED_TAB}")
+              except gspread.WorksheetNotFound:
+                  ws = sheet.add_worksheet(title=UNIFIED_TAB, rows=1000, cols=len(HEADERS))
+                  ws.append_row(HEADERS)
+                  print(f"✅ Created tab: {UNIFIED_TAB}")
+              return ws
+
+          def get_existing_keys(ws):
+              rows = ws.get_all_values()
+              keys = set()
+              for row in rows[1:]:
+                  if len(row) >= 7:
+                      keys.add((row[COL_DATE], normalize_game(row[COL_GAME]), row[COL_TYPE].upper()))
+              return keys
+
+          # ── RESOLVE W/L ───────────────────────────────────────
+          def teams_from_game(game_str):
+              parts = re.split(r"[@]", game_str.upper())
+              if len(parts) == 2:
+                  return parts[0].strip(), parts[1].strip()
+              return None, None
+
+          def resolve_ml(pick, away_score, home_score, game_str):
+              try:
+                  away_score, home_score = float(away_score), float(home_score)
+              except (ValueError, TypeError):
+                  return "PENDING"
+              away_team, home_team = teams_from_game(game_str)
+              pick_upper = pick.upper().replace(" ML","").strip()
+              # Match against abbreviations AND full names
+              away_abbrevs = [away_team] + [k for k,v in ABBREV_TO_FULL.items() if v.upper() == away_team]
+              home_abbrevs = [home_team] + [k for k,v in ABBREV_TO_FULL.items() if v.upper() == home_team]
+              if any(pick_upper in a for a in away_abbrevs):
+                  won = away_score > home_score
+              elif any(pick_upper in h for h in home_abbrevs):
+                  won = home_score > away_score
+              else:
+                  print(f"   ⚠️  Can't match '{pick}' to '{game_str}'")
+                  return "PENDING"
+              if away_score == home_score:
+                  return "PUSH"
+              return "WIN" if won else "LOSS"
+
+          def resolve_total(pick, away_score, home_score):
+              try:
+                  away_score, home_score = float(away_score), float(home_score)
+              except (ValueError, TypeError):
+                  return "PENDING"
+              actual = away_score + home_score
+              m = re.match(r"([OU])(\d+\.?\d*)", pick.upper().replace("OVER","O").replace("UNDER","U"))
+              if not m:
+                  return "PENDING"
+              direction, line = m.group(1), float(m.group(2))
+              if actual == line:
+                  return "PUSH"
+              return "WIN" if (direction=="O" and actual>line) or (direction=="U" and actual<line) else "LOSS"
+
+          # ── MIGRATE EXISTING TABS ─────────────────────────────
+          def migrate(sheet, ws_unified):
+              print("\n🔄 Migrating existing Faro + Atropa data...")
+              existing_keys = get_existing_keys(ws_unified)
+              migrated = 0
+
+              # Migrate Faro tab
+              try:
+                  ws_faro = sheet.worksheet(FARO_TAB)
+                  faro_rows = ws_faro.get_all_values()[1:]
+                  for row in faro_rows:
+                      if len(row) < 4:
+                          continue
+                      date_str  = row[0].strip()
+                      game      = row[1].strip()
+                      faro_pick = row[2].strip()
+                      faro_conf = row[3].strip()
+                      our_pick  = row[4].strip() if len(row) > 4 else ""
+                      our_proj  = row[5].strip() if len(row) > 5 else ""
+                      faro_wl   = row[7].strip() if len(row) > 7 else "PENDING"
+                      our_wl    = row[8].strip() if len(row) > 8 else "PENDING"
+
+                      key = (date_str, normalize_game(game), "ML")
+                      if key in existing_keys:
+                          continue
+
+                      new_row = [""] * len(HEADERS)
+                      new_row[COL_DATE]      = date_str
+                      new_row[COL_GAME]      = game
+                      new_row[COL_TIME]      = ""
+                      new_row[COL_TYPE]      = "ML"
+                      new_row[COL_FARO_PICK] = faro_pick
+                      new_row[COL_FARO_CONF] = faro_conf
+                      new_row[COL_OUR_PICK]  = our_pick
+                      new_row[COL_OUR_PROJ]  = our_proj
+                      new_row[COL_FARO_WL]   = faro_wl
+                      new_row[COL_ATR_WL]    = ""
+                      new_row[COL_OUR_WL]    = our_wl
+                      ws_unified.append_row(new_row)
+                      existing_keys.add(key)
+                      migrated += 1
+                  print(f"   ✅ Faro: {migrated} rows migrated")
+              except gspread.WorksheetNotFound:
+                  print("   ⚠️  Faro tab not found — skipping")
+
+              # Migrate Atropa tab
+              atr_migrated = 0
+              try:
+                  ws_atropa = sheet.worksheet(ATROPA_TAB)
+                  atropa_rows = ws_atropa.get_all_values()[1:]
+                  for row in atropa_rows:
+                      if len(row) < 5:
+                          continue
+                      date_str  = row[0].strip()
+                      matchup   = row[1].strip()
+                      time_str  = row[2].strip()
+                      pick_type = row[3].strip()
+                      atr_pick  = row[4].strip()
+                      atr_book  = row[5].strip() if len(row) > 5 else ""
+                      atr_proj  = row[6].strip() if len(row) > 6 else ""
+                      atr_wl    = row[10].strip() if len(row) > 10 else "PENDING"
+
+                      # Expand abbreviations
+                      game_full    = expand_matchup(matchup)
+                      atr_pick_full = expand_abbrev(atr_pick)
+
+                      key = (date_str, normalize_game(game_full), pick_type.upper())
+                      if key in existing_keys:
+                          continue
+
+                      new_row = [""] * len(HEADERS)
+                      new_row[COL_DATE]     = date_str
+                      new_row[COL_GAME]     = game_full
+                      new_row[COL_TIME]     = time_str
+                      new_row[COL_TYPE]     = pick_type
+                      new_row[COL_ATR_PICK] = atr_pick_full
+                      new_row[COL_ATR_BOOK] = atr_book
+                      new_row[COL_ATR_PROJ] = atr_proj
+                      new_row[COL_FARO_WL]  = ""
+                      new_row[COL_ATR_WL]   = atr_wl
+                      new_row[COL_OUR_WL]   = ""
+                      ws_unified.append_row(new_row)
+                      existing_keys.add(key)
+                      atr_migrated += 1
+                  print(f"   ✅ Atropa: {atr_migrated} rows migrated")
+              except gspread.WorksheetNotFound:
+                  print("   ⚠️  Atropa tab not found — skipping")
+
+              print(f"\n✅ Migration complete — {migrated + atr_migrated} total rows")
+
+          # ── WRITE FARO PICKS ──────────────────────────────────
+          def write_faro(sheet, ws_unified, picks, date_str):
+              existing_keys = get_existing_keys(ws_unified)
+              written = 0
+              for p in picks:
+                  game     = p.get("game", "")
+                  faro_pick = p.get("faro_pick", "")
+                  faro_conf = p.get("conf_pct", "")
+                  key = (date_str, normalize_game(game), "ML")
+                  if key in existing_keys:
+                      # Update Faro columns in existing row instead
+                      all_rows = ws_unified.get_all_values()
+                      for i, row in enumerate(all_rows[1:], start=2):
+                          if row[COL_DATE] == date_str and normalize_game(row[COL_GAME]) == normalize_game(game) and row[COL_TYPE].upper() == "ML":
+                              ws_unified.update_cell(i, COL_FARO_PICK + 1, faro_pick)
+                              ws_unified.update_cell(i, COL_FARO_CONF + 1, str(faro_conf))
+                              print(f"   🔄 Updated Faro cols: {game}")
+                              break
+                      continue
+
+                  new_row = [""] * len(HEADERS)
+                  new_row[COL_DATE]      = date_str
+                  new_row[COL_GAME]      = game
+                  new_row[COL_TIME]      = ""
+                  new_row[COL_TYPE]      = "ML"
+                  new_row[COL_FARO_PICK] = faro_pick
+                  new_row[COL_FARO_CONF] = str(faro_conf)
+                  new_row[COL_FARO_WL]   = "PENDING"
+                  new_row[COL_ATR_WL]    = ""
+                  new_row[COL_OUR_WL]    = "PENDING"
+                  ws_unified.append_row(new_row)
+                  existing_keys.add(key)
+                  written += 1
+                  print(f"   ✅ Faro: {game} | {faro_pick} | {faro_conf}%")
+              print(f"   📊 {written} new Faro rows written")
+
+          # ── WRITE ATROPA PICKS ────────────────────────────────
+          def write_atropa(sheet, ws_unified, picks, date_str):
+              existing_keys = get_existing_keys(ws_unified)
+              written = 0
+              for p in picks:
+                  matchup   = p.get("matchup", "")
+                  game_full = expand_matchup(matchup)
+                  time_str  = p.get("time", "")
+                  pick_type = p.get("type", "ML")
+                  atr_pick  = expand_abbrev(p.get("pick", ""))
+                  atr_book  = p.get("book", "")
+                  atr_proj  = p.get("proj", "")
+
+                  key = (date_str, normalize_game(game_full), pick_type.upper())
+                  if key in existing_keys:
+                      # Update Atropa columns in existing row
+                      all_rows = ws_unified.get_all_values()
+                      for i, row in enumerate(all_rows[1:], start=2):
+                          if row[COL_DATE] == date_str and normalize_game(row[COL_GAME]) == normalize_game(game_full) and row[COL_TYPE].upper() == pick_type.upper():
+                              ws_unified.update_cell(i, COL_ATR_PICK + 1, atr_pick)
+                              ws_unified.update_cell(i, COL_ATR_BOOK + 1, atr_book)
+                              ws_unified.update_cell(i, COL_ATR_PROJ + 1, atr_proj)
+                              print(f"   🔄 Updated Atropa cols: {game_full}")
+                              break
+                      continue
+
+                  new_row = [""] * len(HEADERS)
+                  new_row[COL_DATE]     = date_str
+                  new_row[COL_GAME]     = game_full
+                  new_row[COL_TIME]     = time_str
+                  new_row[COL_TYPE]     = pick_type
+                  new_row[COL_ATR_PICK] = atr_pick
+                  new_row[COL_ATR_BOOK] = atr_book
+                  new_row[COL_ATR_PROJ] = atr_proj
+                  new_row[COL_FARO_WL]  = ""
+                  new_row[COL_ATR_WL]   = "PENDING"
+                  new_row[COL_OUR_WL]   = "PENDING"
+                  ws_unified.append_row(new_row)
+                  existing_keys.add(key)
+                  written += 1
+                  print(f"   ✅ Atropa: {game_full} | {atr_pick} | {atr_proj}")
+              print(f"   📊 {written} new Atropa rows written")
+
+          # ── UPDATE W/L FROM TRACKER ───────────────────────────
+          def update_wl(sheet, ws_unified, date_str):
+              print(f"\n🔄 Updating W/L for {date_str}...")
+
+              ws_tracker   = sheet.worksheet(TRACKER_TAB)
+              tracker_rows = ws_tracker.get_all_values()
+              hdrs         = [h.strip() for h in tracker_rows[0]]
+
+              def find_col(headers, *candidates):
+                  for c in candidates:
+                      for i, h in enumerate(headers):
+                          if c.lower() in h.lower():
+                              return i
+                  return None
+
+              date_col   = find_col(hdrs, "date")
+              game_col   = find_col(hdrs, "game", "matchup")
+              away_act   = find_col(hdrs, "actual away", "away score")
+              home_act   = find_col(hdrs, "actual home", "home score")
+              our_pick_c = find_col(hdrs, "our pick", "pick")
+              our_proj_c = find_col(hdrs, "our proj", "proj score")
+
+              tracker_lookup = {}
+              for row in tracker_rows[1:]:
+                  if not row:
+                      continue
+                  t_date = row[date_col].strip() if date_col is not None else ""
+                  t_game = row[game_col].strip() if game_col is not None else ""
+                  tracker_lookup[(t_date, normalize_game(t_game))] = {
+                      "away_actual": row[away_act].strip()   if away_act   is not None and len(row) > away_act   else "",
+                      "home_actual": row[home_act].strip()   if home_act   is not None and len(row) > home_act   else "",
+                      "our_pick":    row[our_pick_c].strip() if our_pick_c is not None and len(row) > our_pick_c else "",
+                      "our_proj":    row[our_proj_c].strip() if our_proj_c is not None and len(row) > our_proj_c else "",
+                  }
+
+              all_rows = ws_unified.get_all_values()
+              updated = skipped = 0
+
+              for i, row in enumerate(all_rows[1:], start=2):
+                  if len(row) <= COL_OUR_WL or row[COL_DATE] != date_str:
+                      continue
+
+                  faro_wl = row[COL_FARO_WL].strip() if len(row) > COL_FARO_WL else ""
+                  atr_wl  = row[COL_ATR_WL].strip()  if len(row) > COL_ATR_WL  else ""
+                  our_wl  = row[COL_OUR_WL].strip()  if len(row) > COL_OUR_WL  else ""
+
+                  if faro_wl not in ("PENDING","") and atr_wl not in ("PENDING","") and our_wl not in ("PENDING",""):
+                      skipped += 1
+                      continue
+
+                  game      = row[COL_GAME].strip()
+                  pick_type = row[COL_TYPE].strip()
+                  t_data    = tracker_lookup.get((date_str, normalize_game(game)))
+
+                  if not t_data:
+                      print(f"   ⚠️  No tracker match: {game}")
+                      continue
+
+                  away_score = t_data["away_actual"]
+                  home_score = t_data["home_actual"]
+
+                  if not away_score or not home_score:
+                      print(f"   ⏳ {game} — actuals not in yet")
+                      continue
+
+                  # Resolve Faro W/L
+                  faro_pick = row[COL_FARO_PICK].strip() if len(row) > COL_FARO_PICK else ""
+                  if faro_pick and faro_wl in ("PENDING",""):
+                      new_faro_wl = resolve_ml(faro_pick, away_score, home_score, game)
+                      ws_unified.update_cell(i, COL_FARO_WL + 1, new_faro_wl)
+                  else:
+                      new_faro_wl = faro_wl
+
+                  # Resolve Atropa W/L
+                  atr_pick = row[COL_ATR_PICK].strip() if len(row) > COL_ATR_PICK else ""
+                  if atr_pick and atr_wl in ("PENDING",""):
+                      new_atr_wl = resolve_ml(atr_pick, away_score, home_score, game) if pick_type == "ML" else resolve_total(atr_pick, away_score, home_score)
+                      ws_unified.update_cell(i, COL_ATR_WL + 1, new_atr_wl)
+                  else:
+                      new_atr_wl = atr_wl
+
+                  # Resolve Our W/L
+                  our_pick = t_data.get("our_pick","")
+                  if our_wl in ("PENDING",""):
+                      if not our_pick:
+                          new_our_wl = "NO BET"
+                      elif pick_type == "ML":
+                          new_our_wl = resolve_ml(our_pick, away_score, home_score, game)
+                      else:
+                          new_our_wl = resolve_total(our_pick, away_score, home_score)
+                      ws_unified.update_cell(i, COL_OUR_PICK + 1, our_pick)
+                      ws_unified.update_cell(i, COL_OUR_PROJ  + 1, t_data.get("our_proj",""))
+                      ws_unified.update_cell(i, COL_OUR_WL   + 1, new_our_wl)
+                  else:
+                      new_our_wl = our_wl
+
+                  updated += 1
+                  print(f"   ✅ {game} | Faro: {new_faro_wl} | Atropa: {new_atr_wl} | Ours: {new_our_wl}")
+
+              print(f"\n📊 {updated} updated, {skipped} already settled")
+
+          # ── PRINT SUMMARY ─────────────────────────────────────
+          def print_summary(ws_unified):
+              rows = ws_unified.get_all_values()[1:]
+
+              def record(col_idx):
+                  settled = [r for r in rows if len(r) > col_idx and r[col_idx] not in ("PENDING","","NO BET")]
+                  wins    = sum(1 for r in settled if r[col_idx] == "WIN")
+                  losses  = sum(1 for r in settled if r[col_idx] == "LOSS")
+                  total   = wins + losses
+                  pct     = f"{wins/total*100:.1f}%" if total > 0 else "N/A"
+                  return wins, losses, pct
+
+              # Agreement rows
+              all_agree = [r for r in rows
+                           if len(r) > COL_OUR_WL
+                           and r[COL_FARO_WL] == r[COL_ATR_WL] == r[COL_OUR_WL] == "WIN"
+                           or (r[COL_FARO_WL] not in ("","PENDING") and r[COL_ATR_WL] not in ("","PENDING") and r[COL_OUR_WL] not in ("","PENDING","NO BET")
+                               and r[COL_FARO_PICK] and r[COL_ATR_PICK])]
+
+              f_w, f_l, f_pct = record(COL_FARO_WL)
+              a_w, a_l, a_pct = record(COL_ATR_WL)
+              o_w, o_l, o_pct = record(COL_OUR_WL)
+
+              agree_wins = sum(1 for r in all_agree if r[COL_OUR_WL] == "WIN")
+              agree_total = len(all_agree)
+
+              print(f"\n📈 CAPPERS vs MODEL — CUMULATIVE SUMMARY")
+              print(f"{'='*48}")
+              print(f"  {'Model':<22} {'W':>4} {'L':>4} {'Win%':>7}")
+              print(f"  {'-'*42}")
+              print(f"  {'Faro':<22} {f_w:>4} {f_l:>4} {f_pct:>7}")
+              print(f"  {'Atropa':<22} {a_w:>4} {a_l:>4} {a_pct:>7}")
+              print(f"  {'Our Model':<22} {o_w:>4} {o_l:>4} {o_pct:>7}")
+              if agree_total > 0:
+                  print(f"  {'Faro+Atropa Agree':<22} {agree_wins:>4} {agree_total-agree_wins:>4} {agree_wins/agree_total*100:>6.1f}%")
+              print(f"{'='*48}")
+
+          # ── MAIN ──────────────────────────────────────────────
+          date_str    = os.environ.get("RUN_DATE","").strip() or datetime.date.today().isoformat()
+          faro_raw    = os.environ.get("FARO_JSON","[]").strip()
+          atropa_raw  = os.environ.get("ATROPA_JSON","[]").strip()
+          do_migrate  = os.environ.get("MIGRATE","no").strip().lower() == "yes"
+
+          print(f"📅 Date: {date_str}")
+          print(f"Raw Faro preview:   {faro_raw[:80]}")
+          print(f"Raw Atropa preview: {atropa_raw[:80]}")
+
+          sheet     = get_sheet()
+          ws_unified = get_or_create_tab(sheet)
+
+          if do_migrate:
+              migrate(sheet, ws_unified)
+
+          try:
+              faro_picks = json.loads(faro_raw)
+              if isinstance(faro_picks, list) and len(faro_picks) == 1 and isinstance(faro_picks[0], list):
+                  faro_picks = faro_picks[0]
+          except json.JSONDecodeError as e:
+              print(f"❌ Faro JSON error: {e}")
+              faro_picks = []
+
+          try:
+              atropa_picks = json.loads(atropa_raw)
+              if isinstance(atropa_picks, list) and len(atropa_picks) == 1 and isinstance(atropa_picks[0], list):
+                  atropa_picks = atropa_picks[0]
+          except json.JSONDecodeError as e:
+              print(f"❌ Atropa JSON error: {e}")
+              atropa_picks = []
+
+          if faro_picks:
+              print(f"\n⚾ Writing {len(faro_picks)} Faro picks...")
+              write_faro(sheet, ws_unified, faro_picks, date_str)
+
+          if atropa_picks:
+              print(f"\n⚾ Writing {len(atropa_picks)} Atropa picks...")
+              write_atropa(sheet, ws_unified, atropa_picks, date_str)
+
+          update_wl(sheet, ws_unified, date_str)
+          print_summary(ws_unified)
+          EOF
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
