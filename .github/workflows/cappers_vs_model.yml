@@ -357,11 +357,10 @@ jobs:
               for i, row in enumerate(all_rows[1:], start=2):
                   if len(row) <= COL_OUR_WL:
                       continue
-                  if row[COL_DATE] != date_str:
-                      continue
+                  row_date  = row[COL_DATE].strip()
                   game      = row[COL_GAME].strip()
                   pick_type = "TOTAL" if row[COL_TYPE].strip().upper() == "TOTAL" else "ML"
-                  lookup_key = (date_str, normalize_game(game), pick_type)
+                  lookup_key = (row_date, normalize_game(game), pick_type)
                   print(f"   🔍 Looking up: {lookup_key}")
                   t_data    = tracker_lookup.get(lookup_key)
                   if not t_data:
