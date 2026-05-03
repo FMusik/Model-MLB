@@ -233,13 +233,21 @@ jobs:
                   print("   ⚠️  Faro tab not found — skipping")
 
           # ── WRITE FARO PICKS ───────────────────────────────────
+          def faro_to_away_home(game_str):
+              """Faro gives 'Home vs Away' — flip to 'Away @ Home' to match Atropa."""
+              if " vs " in game_str.lower():
+                  parts = re.split(r" vs ", game_str, flags=re.IGNORECASE)
+                  if len(parts) == 2:
+                      return f"{parts[1].strip()} @ {parts[0].strip()}"
+              return game_str
+
           def write_faro(sheet, ws_unified, picks, date_str):
               existing_keys = get_existing_keys(ws_unified)
               all_rows = ws_unified.get_all_values()
               written  = 0
               updates  = []
               for p in picks:
-                  game      = p.get("game", "")
+                  game      = faro_to_away_home(p.get("game", ""))
                   faro_pick = p.get("faro_pick", "")
                   faro_conf = str(p.get("conf_pct", ""))
                   key = (date_str, normalize_game(game), "ML")
