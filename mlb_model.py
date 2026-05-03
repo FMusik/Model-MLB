@@ -761,7 +761,7 @@ def _fetch_oddspapi_book(bookmaker: str, odds_api_games: dict = None) -> dict:
                     price_am = player.get("priceAmerican")
                     if price_am is None: continue
                     pname = str(player.get("playerName","") or "").strip()
-                    line  = player.get("limit") or player.get("line")
+                    line  = player.get("line")
                     active_ocs.append({
                         "american": int(price_am),
                         "name":     pname.lower(),
