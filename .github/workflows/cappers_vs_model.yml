@@ -198,9 +198,9 @@ jobs:
               return keys
 
           # ── MIGRATE FARO TAB ───────────────────────────────────
-          def migrate(sheet, ws_unified):
+          def migrate(sheet, fied):
               print("\n🔄 Migrating Faro data...")
-              existing_keys = get_existing_keys(ws_unified)
+              existing_keys = get_existing_keys(fied)
               migrated = 0
               try:
                   ws_faro   = sheet.worksheet(FARO_TAB)
@@ -272,7 +272,13 @@ jobs:
                   written += 1
                   print(f"   ✅ Faro: {game} | {faro_pick} | {faro_conf}%")
               if updates:
-                  ws_unified.batch_update(updates)
+                  ws_unified.spreadsheet.values_batch_update({
+                      "valueInputOption": "USER_ENTERED",
+                      "data": [
+                          {"range": f"'📊 Cappers vs Model'!{u['range']}", "values": u["values"]}
+                          for u in updates
+                      ]
+                  })
               print(f"   📊 {written} new Faro rows written")
 
           # ── WRITE ATROPA PICKS ─────────────────────────────────
@@ -309,7 +315,13 @@ jobs:
                   written += 1
                   print(f"   ✅ Atropa: {game_full} | {atr_pick} | {atr_proj}")
               if updates:
-                  ws_unified.batch_update(updates)
+                  ws_unified.spreadsheet.values_batch_update({
+                      "valueInputOption": "USER_ENTERED",
+                      "data": [
+                          {"range": f"'📊 Cappers vs Model'!{u['range']}", "values": u["values"]}
+                          for u in updates
+                      ]
+                  })
               print(f"   📊 {written} new Atropa rows written")
 
           # ── UPDATE Our Pick + Our Conf% + Our W/L FROM TRACKER ─
