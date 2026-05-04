@@ -2417,12 +2417,13 @@ def score_signal(our_prob, market_odds, sharp_confirms=False, sharp_fades=False,
     # ── CAP AND CONVERT ───────────────────────────────────────
     conf = round(max(35.0, min(85.0, conf)), 1)
 
-    # ── UNIT SIZING ───────────────────────────────────────────
-    if conf >= 70:    units = 1.00
-    elif conf >= 60:  units = 0.75
-    elif conf >= 55:  units = 0.50
-    elif conf >= 50:  units = 0.25
-    else:             units = 0.0  # SKIP
+    # ── UNIT SIZING (data-driven from R analysis 2026-05-03) ─────
+    # 70%+:   52.4% WR → 0.50U (not enough edge for 1.00U)
+    # 55-70%: 31-43% WR → SKIP (consistent losers across both bands)
+    # <50%:   55.9% WR → 0.25U (counterintuitively profitable)
+    if conf >= 70:                   units = 0.50
+    elif conf >= 50 and conf < 55:   units = 0.25
+    else:                            units = 0.0  # SKIP (55-70% band loses)
 
     # YRFI always sprinkle regardless of conf
     if bet_type == "yrfi" and units > 0:
@@ -3424,11 +3425,9 @@ def build_best_bets_str(r):
             # Unit sizing from conf
             try:
                 cf = float(conf)
-                if cf>=70: u="1.00U"
-                elif cf>=60: u="0.75U"
-                elif cf>=55: u="0.50U"
-                elif cf>=50: u="0.25U"
-                else: u="0.10U"
+                if cf>=70: u="0.50U"
+                elif cf>=50 and cf<55: u="0.25U"
+                else: u="0.10U"  # SKIP band
             except: u="0.25U"
             if "YRFI" in label: u="0.10U"
             bets.append(f"{flag} {label}{odds_str}{edge_str} → {u}")
@@ -3467,11 +3466,9 @@ def print_game_summary(r):
             kelly_str=""
             if isinstance(prob,(int,float)) and isinstance(odds,int):
                 conf_val = float(conf) if isinstance(conf,(int,float)) else 0
-                if conf_val >= 70:    units = 1.00
-                elif conf_val >= 60:  units = 0.75
-                elif conf_val >= 55:  units = 0.50
-                elif conf_val >= 50:  units = 0.25
-                else:                 units = 0.10
+                if conf_val >= 70:                    units = 0.50
+                elif conf_val >= 50 and conf_val < 55: units = 0.25
+                else:                                  units = 0.10  # SKIP band
                 if "YRFI" in label:   units = 0.10
                 kelly_str = f" | 🎯 {units}U"
             signals.append(f"   {flag} → {label}{odds_str}{edge_str}{prob_str}{kelly_str}")
@@ -3568,11 +3565,9 @@ def push_tracker_rows(sheet,results):
             # Unit sizing from confidence
             try:
                 cf=float(conf)
-                if cf>=70: units="1.00U"
-                elif cf>=60: units="0.75U"
-                elif cf>=55: units="0.50U"
-                elif cf>=50: units="0.25U"
-                else: units="0.10U"
+                if cf>=70: units="0.50U"
+                elif cf>=50 and cf<55: units="0.25U"
+                else: units="0.10U"  # SKIP band
             except: units="0.25U"
             if "YRFI" in bet_label: units="0.10U"
             all_rows.append([
