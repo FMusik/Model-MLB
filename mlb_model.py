@@ -2992,28 +2992,51 @@ def analyze_game(game: dict, current_odds: dict = None, snapshot: dict = None) -
                              bet_type="home_ml", mc_prob=sim["home_win_prob"])
         edges["f5_home_ml_edge"]=edge; edges["f5_home_ml_score"]=conf; edges["f5_home_ml_flag"]=sig
 
-    rl_line=abs(float(market.get("away_rl_line",-1.5) or -1.5))
+    rl_line_raw = float(market.get("away_rl_line", -1.5) or -1.5)
+    rl_line = abs(rl_line_raw)
+    # away_rl_line is negative when away team is the FAVORITE (e.g. -1.5)
+    # away_rl_line is positive when away team is the UNDERDOG (e.g. +1.5)
+    away_is_rl_favorite = rl_line_raw < 0  # away team giving 1.5 runs
+    away_rl_label = f"RL {'-' if away_is_rl_favorite else '+'}{rl_line}"
+    home_rl_label = f"RL {'+' if away_is_rl_favorite else '-'}{rl_line}"
+    edges["away_rl_label"] = away_rl_label
+    edges["home_rl_label"] = home_rl_label
     if market.get("away_rl_odds"):
         arlp,hrlp=run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)
         edges["away_rl_prob"]=round(arlp*100,1); edges["home_rl_prob"]=round(hrlp*100,1)
         edges["fair_away_rl"]=prob_to_american(arlp); edges["fair_home_rl"]=prob_to_american(hrlp)
-        sig,conf,edge=_score(arlp,market["away_rl_odds"],"away_spread","away_ml","ml",
-                             bet_type="away_spread",
-                             pitcher_form=away_pitcher_form_str,
-                             fatigue_f=away_fatigue_f, travel_f=away_travel_f,
-                             mc_prob=sim["away_rl_prob"])
+        away_rl_odds = market["away_rl_odds"]
+        # Hard skip: away team is a heavy RL favorite (laying -1.5 at -200 or worse)
+        # This means the bet is "away wins by 2+" at terrible juice — skip it
+        if away_is_rl_favorite and away_rl_odds < -180:
+            sig = f"— SKIP (away RL fav at {away_rl_odds}, juice too high)"
+            conf, edge = 0.0, calc_edge(arlp, away_rl_odds)
+            print(f"  ⛔ Away RL: {sig}")
+        else:
+            sig,conf,edge=_score(arlp,away_rl_odds,"away_spread","away_ml","ml",
+                                 bet_type="away_spread",
+                                 pitcher_form=away_pitcher_form_str,
+                                 fatigue_f=away_fatigue_f, travel_f=away_travel_f,
+                                 mc_prob=sim["away_rl_prob"])
+            if "SKIP" in str(sig): print(f"  ⛔ Away RL ({away_rl_label}): {sig} (prob={arlp*100:.1f}% mkt={away_rl_odds} edge={edge:.1f}%)")
+            else: print(f"  ✅ Away RL ({away_rl_label}): {sig} (prob={arlp*100:.1f}% edge={edge:.1f}%)")
         edges["away_rl_edge"]=edge; edges["away_rl_score"]=conf; edges["away_rl_flag"]=sig
-        if "SKIP" in str(sig): print(f"  ⛔ Away RL: {sig} (prob={arlp*100:.1f}% mkt={market.get('away_rl_odds')} edge={edge:.1f}%)")
-        else: print(f"  ✅ Away RL: {sig} (prob={arlp*100:.1f}% edge={edge:.1f}%)")
     if market.get("home_rl_odds"):
         hrlp_val=edges.get("home_rl_prob",50)/100 if "home_rl_prob" in edges else run_line_probability(runs["away_proj_runs"],runs["home_proj_runs"],rl_line)[1]
-        sig,conf,edge=_score(hrlp_val,market["home_rl_odds"],"home_spread","home_ml","ml",
-                             bet_type="home_spread",
-                             pitcher_form=home_pitcher_form_str,
-                             mc_prob=sim["home_rl_prob"])
+        home_rl_odds = market["home_rl_odds"]
+        # Hard skip: home team is a heavy RL favorite (laying -1.5 at -200 or worse)
+        if not away_is_rl_favorite and home_rl_odds < -180:
+            sig = f"— SKIP (home RL fav at {home_rl_odds}, juice too high)"
+            conf, edge = 0.0, calc_edge(hrlp_val, home_rl_odds)
+            print(f"  ⛔ Home RL: {sig}")
+        else:
+            sig,conf,edge=_score(hrlp_val,home_rl_odds,"home_spread","home_ml","ml",
+                                 bet_type="home_spread",
+                                 pitcher_form=home_pitcher_form_str,
+                                 mc_prob=sim["home_rl_prob"])
+            if "SKIP" in str(sig): print(f"  ⛔ Home RL ({home_rl_label}): {sig} (prob={hrlp_val*100:.1f}% mkt={home_rl_odds} edge={edge:.1f}%)")
+            else: print(f"  ✅ Home RL ({home_rl_label}): {sig} (prob={hrlp_val*100:.1f}% edge={edge:.1f}%)")
         edges["home_rl_edge"]=edge; edges["home_rl_score"]=conf; edges["home_rl_flag"]=sig
-        if "SKIP" in str(sig): print(f"  ⛔ Home RL: {sig} (prob={hrlp_val*100:.1f}% mkt={market.get('home_rl_odds')} edge={edge:.1f}%)")
-        else: print(f"  ✅ Home RL: {sig} (prob={hrlp_val*100:.1f}% edge={edge:.1f}%)")
 
     if market.get("yrfi_odds"):
         ua_yr=get_ump_signal_adjustment(ump_name,"yrfi")
@@ -3406,8 +3429,8 @@ def build_best_bets_str(r):
     for fk,ok,label in [
         ("away_ml_flag","away_ml",f"{r.get('away_team','')} ML"),
         ("home_ml_flag","home_ml",f"{r.get('home_team','')} ML"),
-        ("away_rl_flag","away_rl_odds",f"{r.get('away_team','')} RL +1.5"),
-        ("home_rl_flag","home_rl_odds",f"{r.get('home_team','')} RL +1.5"),
+        ("away_rl_flag","away_rl_odds",f"{r.get('away_team','')} {r.get('away_rl_label','RL +1.5')}"),
+        ("home_rl_flag","home_rl_odds",f"{r.get('home_team','')} {r.get('home_rl_label','RL +1.5')}"),
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}"),
         ("f5_over_flag","f5_over_odds","F5 OVER"),
@@ -3439,8 +3462,8 @@ def print_game_summary(r):
     for fk,ok,label,pk in [
         ("away_ml_flag","away_ml",f"{away} ML","away_win_pct"),
         ("home_ml_flag","home_ml",f"{home} ML","home_win_pct"),
-        ("away_rl_flag","away_rl_odds",f"{away} RL +1.5","away_rl_prob"),
-        ("home_rl_flag","home_rl_odds",f"{home} RL +1.5","home_rl_prob"),
+        ("away_rl_flag","away_rl_odds",f"{away} {r.get('away_rl_label','RL +1.5')}","away_rl_prob"),
+        ("home_rl_flag","home_rl_odds",f"{home} {r.get('home_rl_label','RL +1.5')}","home_rl_prob"),
         ("over_flag","over_odds",f"OVER {r.get('total_line','')}","over_prob"),
         ("under_flag","under_odds",f"UNDER {r.get('total_line','')}","under_prob"),
         ("f5_over_flag","f5_over_odds","F5 OVER","f5_over_prob"),
@@ -3546,8 +3569,8 @@ def push_tracker_rows(sheet,results):
         signal_map=[
             ("away_ml_flag","away_ml_edge","away_ml",r.get("away_win_pct",0)*100,f"{away} ML",r.get("fair_away_ml",""),"away_ml_score"),
             ("home_ml_flag","home_ml_edge","home_ml",r.get("home_win_pct",0)*100,f"{home} ML",r.get("fair_home_ml",""),"home_ml_score"),
-            ("away_rl_flag","away_rl_edge","away_rl_odds",r.get("away_rl_prob"),f"{away} RL +1.5",r.get("fair_away_rl",""),"away_rl_score"),
-            ("home_rl_flag","home_rl_edge","home_rl_odds",r.get("home_rl_prob"),f"{home} RL +1.5",r.get("fair_home_rl",""),"home_rl_score"),
+            ("away_rl_flag","away_rl_edge","away_rl_odds",r.get("away_rl_prob"),f"{away} {r.get('away_rl_label','RL +1.5')}",r.get("fair_away_rl",""),"away_rl_score"),
+            ("home_rl_flag","home_rl_edge","home_rl_odds",r.get("home_rl_prob"),f"{home} {r.get('home_rl_label','RL +1.5')}",r.get("fair_home_rl",""),"home_rl_score"),
             ("over_flag","over_edge","over_odds",r.get("over_prob"),f"OVER {r.get('total_line','')}",r.get("fair_over",""),"over_score"),
             ("under_flag","under_edge","under_odds",r.get("under_prob"),f"UNDER {r.get('total_line','')}",r.get("fair_under",""),"under_score"),
             ("f5_over_flag","f5_over_edge","f5_over_odds",r.get("f5_over_prob"),f"F5 OVER",r.get("fair_f5_over",""),"f5_over_score"),
