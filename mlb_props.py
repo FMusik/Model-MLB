@@ -23,6 +23,7 @@ import math
 import datetime
 import unicodedata
 import difflib
+from bisect import bisect_right
 from collections import Counter
 
 try:
@@ -574,10 +575,9 @@ def build_rows(props, bpp, pitcher_hands):
         matchup_label = f"{bs} vs {ph}"
         matchup       = matchup_score(bs_raw, ph_raw)
         matchup_counter[int(matchup)] += 1
-        composite     = composite_score(blended, edge_pct, matchup)
-
-        # Per-player matchup trace (raw inputs + result, every prop)
-        print(f"{p['player']}: bs={bs_raw!r} ph={ph_raw!r} → matchup={matchup}")
+        # Composite is computed in a post-pass below using percentile rank of
+        # the blended hit prob — placeholder 0 here, overwritten before sort.
+        composite     = 0.0
 
         out.append([
             today,
@@ -610,9 +610,32 @@ def build_rows(props, bpp, pitcher_hands):
 
     if stats_total:
         print(f"  📊 MLB Stats API: {stats_hits}/{stats_total} players returned BA components")
-    if matchup_counter:
-        print(f"  📊 Matchup score counts: {dict(matchup_counter)}")
-        print(f"  📊 (BatterStand, PitcherHand) counts: {dict(bs_ph_counter)}")
+    if bs_ph_counter:
+        rr = bs_ph_counter.get(("R", "R"), 0)
+        rl = bs_ph_counter.get(("R", "L"), 0)
+        lr = bs_ph_counter.get(("L", "R"), 0)
+        ll = bs_ph_counter.get(("L", "L"), 0)
+        s_count = sum(v for (b, _), v in bs_ph_counter.items() if b == "S")
+        print(
+            f"  📊 Matchup distribution: "
+            f"R vs R: {rr}, R vs L: {rl}, L vs R: {lr}, L vs L: {ll}, S: {s_count}"
+        )
+
+    # Recompute composite using percentile RANKS of today's pool.
+    # BPP HitProbability sits in a narrow 0.24–0.76 band and Edge % in a
+    # similarly tight range, so raw-scaled scores produce almost no spread.
+    # Ranking against the day's distribution forces the full 0–100 range.
+    #   r[10] = BPP HitProb %   r[19] = Edge %
+    #   r[21] = Matchup Score   r[22] = Composite Score (target)
+    if out:
+        sorted_hit  = sorted(r[10] for r in out)
+        sorted_edge = sorted(r[19] for r in out)
+        n           = len(out)
+        for r in out:
+            hit_pr    = 100.0 * bisect_right(sorted_hit,  r[10]) / n
+            edge_pr   = 100.0 * bisect_right(sorted_edge, r[19]) / n
+            composite = 0.50 * hit_pr + 0.30 * edge_pr + 0.20 * r[21]
+            r[22]     = round(composite, 2)
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
