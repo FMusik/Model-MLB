@@ -32,6 +32,7 @@ try:
 except Exception:
     ET_ZONE = None
 
+import numpy as np
 import requests
 import pandas as pd
 import gspread
@@ -71,12 +72,14 @@ HEADERS = [
     "Matchup",
     "Model Prob %", "Edge %", "Edge Flag",
     "Composite Score", "Rating",
+    "Kelly Units", "MC Win%",
 ]
 
 BEST_HEADERS = [
     "Game Time", "Player", "Team", "Matchup", "Line", "Side",
     "Best Odds", "Best Book", "BPP Hit%", "Model Prob%", "Edge%",
     "Rating", "Composite Score",
+    "Kelly Units", "MC Win%",
 ]
 
 TRACKER_HEADERS = [
@@ -84,6 +87,7 @@ TRACKER_HEADERS = [
     "Best Odds", "Best Book",
     "BPP Hit%", "Model Prob%", "Edge%",
     "Composite Score", "Rating", "Result", "Notes",
+    "Kelly Units", "MC Win%",
 ]
 
 
@@ -397,8 +401,15 @@ def fetch_batter_stats(player_id: str, session: requests.Session) -> dict:
             try: out["career"] = float(avg)
             except (TypeError, ValueError): pass
         elif "season" in kind:
-            avg = splits[0].get("stat", {}).get("avg")
+            stat = splits[0].get("stat", {})
+            avg  = stat.get("avg")
+            h    = stat.get("hits")
+            ab   = stat.get("atBats")
             try: out["season"] = float(avg)
+            except (TypeError, ValueError): pass
+            try: out["season_h"]  = int(h)
+            except (TypeError, ValueError): pass
+            try: out["season_ab"] = int(ab)
             except (TypeError, ValueError): pass
         elif "gamelog" in kind:
             recent = splits[-20:] if len(splits) > 20 else splits
@@ -465,6 +476,63 @@ def model_over_prob(p_game_hit: float, ab_raw: float, line: float) -> float:
     for k in range(threshold):
         cdf += math.comb(n, k) * (p ** k) * ((1 - p) ** (n - k))
     return max(0.0, min(1.0, 1 - cdf))
+
+
+# ── BET SIZING + SIMULATION ────────────────────────────────────
+def kelly_units(model_prob, american_odds, fraction: float = 0.25,
+                min_units: float = 0.5, max_units: float = 3.0) -> float:
+    """Quarter-Kelly recommendation in units (1 unit = 1% bankroll).
+
+    Kelly% = (p·b − q) / b   with   b = decimal_odds − 1
+    Returns 0 when Kelly is non-positive (no-bet). Otherwise the quarter-Kelly
+    percentage is clamped to [min_units, max_units] and rounded to 0.5.
+    """
+    if model_prob is None or american_odds is None:
+        return 0.0
+    if american_odds > 0:
+        decimal_odds = 1.0 + american_odds / 100.0
+    elif american_odds < 0:
+        decimal_odds = 1.0 + 100.0 / abs(american_odds)
+    else:
+        return 0.0
+    b = decimal_odds - 1.0
+    if b <= 0:
+        return 0.0
+    p = model_prob
+    q = 1.0 - p
+    full_kelly_pct = (p * b - q) / b * 100.0
+    fractional_pct = fraction * full_kelly_pct
+    if fractional_pct <= 0:
+        return 0.0
+    units = max(min_units, min(max_units, fractional_pct))
+    return round(units * 2) / 2  # nearest 0.5
+
+
+def monte_carlo_win_prob(season_h, season_ab, bpp_ab, line, side,
+                          n_sims: int = 10_000):
+    """Monte Carlo P(win the bet) using a Beta posterior on the player's hit rate.
+
+    Each sim:
+      1. Draw hit_rate ~ Beta(season_h + 1, season_ab − season_h + 1)
+      2. Simulate bpp_ab Bernoulli trials at that rate
+      3. Count whether resulting hits beat the line on the given side
+    """
+    if season_ab is None or season_ab == 0:
+        return None
+    if bpp_ab is None or bpp_ab <= 0:
+        return None
+    if side not in ("Over", "Under"):
+        return None
+    h        = max(0, int(season_h or 0))
+    ab_total = max(h, int(season_ab))
+    alpha    = h + 1
+    beta_p   = (ab_total - h) + 1
+    n_ab     = max(1, int(round(bpp_ab)))
+
+    rates = np.random.beta(alpha, beta_p, size=n_sims)
+    hits  = np.random.binomial(n_ab, rates)
+    wins  = (hits > line).sum() if side == "Over" else (hits < line).sum()
+    return float(wins) / n_sims
 
 
 # ── COMPOSITE SCORING ──────────────────────────────────────────
@@ -553,6 +621,13 @@ def build_rows(props, bpp, pitcher_hands):
         bs_ph_counter[(bs, ph)] += 1
         matchup_label = f"{bs} vs {ph}"
 
+        # Bet sizing + MC simulation
+        kelly = kelly_units(model_p, p["price"])
+        mc    = monte_carlo_win_prob(
+            stats.get("season_h"), stats.get("season_ab"),
+            rec["ab"], p["line"], p["side"],
+        )
+
         out.append([
             today,
             format_game_time(p.get("game_time", "")),
@@ -577,6 +652,8 @@ def build_rows(props, bpp, pitcher_hands):
             "✅" if edge >= EDGE_THRESHOLD else "",
             0.0,   # composite placeholder, filled by the percentile post-pass
             "",    # rating assigned below by rank
+            kelly,
+            round(mc * 100, 2) if mc is not None else "",
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -678,9 +755,12 @@ def build_best_bets(rows):
             r[19],  # Edge%
             r[22],  # Rating
             r[21],  # Composite Score
+            r[23],  # Kelly Units
+            r[24],  # MC Win%
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
-    # (24-hour ET) so lexicographic sort is chronological.
+    # (24-hour ET) so lexicographic sort is chronological. Composite is at
+    # column 12 of the Best Bets row.
     bests.sort(key=lambda b: (b[0], -b[12]))
     return bests
 
@@ -741,6 +821,7 @@ def build_tracker_rows(rows):
             r[10], r[18], r[19],
             r[21], r[22],
             "", "",
+            r[23], r[24],   # Kelly Units, MC Win%
         ])
     return out
 
@@ -881,9 +962,9 @@ def main():
     write_best_bets(sheet, bests)
 
     edges  = sum(1 for r in rows if r[20])
-    elite  = sum(1 for r in rated if r[-1] == "ELITE")
-    strong = sum(1 for r in rated if r[-1] == "STRONG")
-    lean   = sum(1 for r in rated if r[-1] == "LEAN")
+    elite  = sum(1 for r in rated if r[22] == "ELITE")
+    strong = sum(1 for r in rated if r[22] == "STRONG")
+    lean   = sum(1 for r in rated if r[22] == "LEAN")
     print(
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
