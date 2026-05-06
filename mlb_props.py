@@ -379,7 +379,7 @@ def _get_or_create_ws(sheet, title, rows=1000, cols=20):
 def write_today(sheet, rows):
     ws = _get_or_create_ws(sheet, TODAY_TAB)
     ws.clear()
-    ws.update("A1", [HEADERS] + rows, value_input_option="USER_ENTERED")
+    ws.update(range_name="A1", values=[HEADERS] + rows, value_input_option="USER_ENTERED")
     print(f"  ✅ {TODAY_TAB}: {len(rows)} rows")
 
 
