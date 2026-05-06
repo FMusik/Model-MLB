@@ -52,11 +52,17 @@ import pandas as pd
 print("\n🔍 PITCHERS columns:")
 df_p = pd.read_excel("ballparkpal_pitchers.xlsx", engine="openpyxl")
 print(f"  {list(df_p.columns)}")
-print("  First row sample:")
-print(f"  {df_p.iloc[0].to_dict()}")
+if len(df_p) > 0:
+    print("  First row sample:")
+    print(f"  {df_p.iloc[0].to_dict()}")
+else:
+    print("  ⚠️  Pitchers file has no data rows")
 
 print("\n🔍 TEAMS columns:")
 df_t = pd.read_excel("ballparkpal_teams.xlsx", engine="openpyxl")
 print(f"  {list(df_t.columns)}")
-print("  First row sample:")
-print(f"  {df_t.iloc[0].to_dict()}")
+if len(df_t) > 0:
+    print("  First row sample:")
+    print(f"  {df_t.iloc[0].to_dict()}")
+else:
+    print("  ⚠️  Teams file has no data rows")
