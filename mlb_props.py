@@ -586,27 +586,57 @@ def write_today(sheet, rows):
 
 
 def append_tracker(sheet, rows):
-    print(f"  🔧 HEADERS ({len(HEADERS)} cols): {HEADERS}")
+    """Append today's rows to Props Tracker, enforcing the current schema.
+
+    Schema check is strict: row 1 must equal HEADERS exactly. Any mismatch
+    (different headers, different order, different count) wipes the tab and
+    rewrites a fresh header — historical rows from older schemas are
+    incompatible and can't be safely mixed with current-schema rows.
+
+    Cleanup: when the header matches but legacy data rows have a different
+    column count, those rows are dropped and the surviving rows are
+    rewritten in place.
+    """
+    n_cols = len(HEADERS)
+    print(f"  🔧 HEADERS ({n_cols} cols): {HEADERS}")
+
     try:
         ws = sheet.worksheet(TRACKER_TAB)
         existing = ws.get_all_values()
         print(f"  🔧 {TRACKER_TAB}: found existing tab, {len(existing)} rows")
-        first_row = existing[0] if existing else []
-        if first_row[:1] != HEADERS[:1]:  # row 1 doesn't start with "Date"
-            print(f"  ➕ {TRACKER_TAB}: row 1 isn't header — inserting header at top")
-            ws.insert_row(HEADERS, index=1, value_input_option="USER_ENTERED")
+
+        if not existing or existing[0] != HEADERS:
+            print(f"  ⚠️  {TRACKER_TAB}: schema mismatch — wiping tab and rewriting header")
+            ws.clear()
+            ws.append_row(HEADERS, value_input_option="USER_ENTERED")
         else:
-            print(f"  🔧 {TRACKER_TAB}: header already present in row 1")
+            data_rows  = existing[1:]
+            valid_data = [r for r in data_rows if len(r) == n_cols]
+            dropped    = len(data_rows) - len(valid_data)
+            if dropped > 0:
+                print(f"  🧹 {TRACKER_TAB}: dropping {dropped} legacy rows with wrong column count")
+                ws.clear()
+                ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+                if valid_data:
+                    ws.append_rows(valid_data, value_input_option="USER_ENTERED")
+            else:
+                print(f"  🔧 {TRACKER_TAB}: schema OK, {len(data_rows)} historical rows preserved")
     except gspread.WorksheetNotFound:
         print(f"  ➕ {TRACKER_TAB}: tab missing — creating with header")
-        ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(20, len(HEADERS)))
+        ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(30, n_cols))
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
 
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-        print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} rows")
-    else:
+    if not rows:
         print(f"  ⚠️  {TRACKER_TAB}: no rows to append")
+        return
+
+    valid_rows = [r for r in rows if len(r) == n_cols]
+    bad        = len(rows) - len(valid_rows)
+    if bad > 0:
+        print(f"  ⚠️  {TRACKER_TAB}: dropping {bad} of today's rows with wrong column count")
+    if valid_rows:
+        ws.append_rows(valid_rows, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TRACKER_TAB}: appended {len(valid_rows)} rows")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
