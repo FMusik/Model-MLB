@@ -86,8 +86,9 @@ TRACKER_HEADERS = [
     "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
     "Best Odds", "Best Book",
     "BPP Hit%", "Model Prob%", "Edge%",
-    "Composite Score", "Rating", "Result", "Notes",
+    "Composite Score", "Rating",
     "Kelly Units", "MC Win%",
+    "Result", "Notes",
 ]
 
 
@@ -808,8 +809,10 @@ def build_tracker_rows(rows):
       19 Edge %        → Edge%
       21 Composite     → Composite Score
       22 Rating        → Rating
-      ""               → Result
-      ""               → Notes
+      23 Kelly Units   → Kelly Units
+      24 MC Win%       → MC Win%
+      ""               → Result   (last col, manual fill-in)
+      ""               → Notes    (last col, manual fill-in)
     """
     out = []
     for r in rows:
@@ -820,8 +823,8 @@ def build_tracker_rows(rows):
             r[8], r[7],
             r[10], r[18], r[19],
             r[21], r[22],
-            "", "",
             r[23], r[24],   # Kelly Units, MC Win%
+            "", "",          # Result, Notes (manual fill-in, last two cols)
         ])
     return out
 
