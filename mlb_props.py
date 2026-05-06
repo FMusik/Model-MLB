@@ -411,8 +411,12 @@ def _get_or_create_ws(sheet, title, rows=1000, cols=20):
 def write_today(sheet, rows):
     ws = _get_or_create_ws(sheet, TODAY_TAB)
     ws.clear()
-    ws.update(range_name="A1", values=[HEADERS] + rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TODAY_TAB}: {len(rows)} rows")
+    # Two explicit writes so row 1 is always the header, even if `rows` is
+    # empty or a combined write skipped the header slot.
+    ws.update(range_name="A1", values=[HEADERS], value_input_option="USER_ENTERED")
+    if rows:
+        ws.update(range_name="A2", values=rows, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TODAY_TAB}: {len(rows)} rows + header")
 
 
 def append_tracker(sheet, rows):
