@@ -81,6 +81,8 @@ def get_sheet():
         sys.exit("❌ PROPS_SHEET_ID not set")
     creds  = _load_credentials()
     client = gspread.authorize(creds)
+    print(f"🔑 PROPS_SHEET_ID = {PROPS_SHEET_ID}")
+    print(f"🔑 Service account = {getattr(creds, 'service_account_email', '(unknown)')}")
     return client.open_by_key(PROPS_SHEET_ID)
 
 
