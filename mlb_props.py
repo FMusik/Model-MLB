@@ -79,6 +79,13 @@ BEST_HEADERS = [
     "Rating", "Composite Score",
 ]
 
+TRACKER_HEADERS = [
+    "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
+    "Best Odds", "Best Book",
+    "BPP Hit%", "Model Prob%", "Edge%",
+    "Composite Score", "Rating", "Result", "Notes",
+]
+
 
 def format_game_time(iso_str: str) -> str:
     """Convert ISO UTC commence_time to 24-hour ET display (e.g. '19:35')."""
@@ -700,6 +707,44 @@ def write_best_bets(sheet, best_rows):
     print(f"  ✅ {BEST_TAB}: header + {len(best_rows)} rows")
 
 
+# ── PROPS TRACKER ──────────────────────────────────────────────
+def build_tracker_rows(rows):
+    """ELITE/STRONG rows mapped to TRACKER_HEADERS shape.
+
+    Result and Notes columns are blank — filled in manually after the game.
+
+    Source HEADERS index → tracker column:
+      0  Date          → Date
+      1  Game Time     → Game Time
+      2  Player        → Player
+      3  Team          → Team
+      4  Game          → Game
+      5  Line          → Line
+      6  Side          → Side
+      8  Odds          → Best Odds
+      7  Bookmaker     → Best Book
+      10 BPP HitProb % → BPP Hit%
+      18 Model Prob %  → Model Prob%
+      19 Edge %        → Edge%
+      21 Composite     → Composite Score
+      22 Rating        → Rating
+      ""               → Result
+      ""               → Notes
+    """
+    out = []
+    for r in rows:
+        if r[22] not in ("ELITE", "STRONG"):
+            continue
+        out.append([
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+            r[8], r[7],
+            r[10], r[18], r[19],
+            r[21], r[22],
+            "", "",
+        ])
+    return out
+
+
 # ── SHEET WRITES ───────────────────────────────────────────────
 def _get_or_create_ws(sheet, title, rows=1000, cols=30):
     try:
@@ -739,36 +784,69 @@ def write_today(sheet, rows):
     print(f"  ✅ {TODAY_TAB}: header + {len(rows)} rows")
 
 
-def append_tracker(sheet, rows):
-    """Append flagged rows to the Props Tracker. NEVER clears the tab.
+def append_tracker(sheet, tracker_rows):
+    """Append ELITE/STRONG rows to the Props Tracker. NEVER clears the tab.
 
-    Tracker is the historical log — every edge-flagged row from every run
-    accumulates here. Schema may evolve over time; older rows keep their
-    original column layout, newer rows use the current HEADERS. The header
-    is written only when the tab is first created or is currently empty.
+    The tracker is the historical log — every play we'd care to track
+    (ELITE/STRONG only) accumulates here. The "Result" and "Notes" columns
+    are left blank for manual fill-in after the game.
+
+    Schema migration policy: never wipe historical data. If the existing
+    header is a strict prefix of TRACKER_HEADERS, the new column names get
+    appended to the right of row 1 and existing rows keep their layout.
+    Other mismatches log a warning and append new rows in the current
+    schema — old rows are preserved as-is, possibly misaligned.
     """
-    n_cols = len(HEADERS)
-    print(f"  🔧 HEADERS ({n_cols} cols): {HEADERS}")
+    n_cols = len(TRACKER_HEADERS)
+    end_col = _col_letter(n_cols)
+    print(f"  🔧 TRACKER_HEADERS ({n_cols} cols): {TRACKER_HEADERS}")
 
     try:
         ws = sheet.worksheet(TRACKER_TAB)
         first_row = ws.row_values(1)
+
         if not first_row:
-            ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+            ws.update(
+                range_name=f"A1:{end_col}1",
+                values=[TRACKER_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
             print(f"  ➕ {TRACKER_TAB}: tab was empty — wrote header")
+        elif first_row == TRACKER_HEADERS:
+            print(f"  🔧 {TRACKER_TAB}: header matches, append-only")
+        elif (
+            len(first_row) < n_cols
+            and TRACKER_HEADERS[: len(first_row)] == first_row
+        ):
+            new_cols  = TRACKER_HEADERS[len(first_row):]
+            start_col = _col_letter(len(first_row) + 1)
+            ws.update(
+                range_name=f"{start_col}1:{end_col}1",
+                values=[new_cols],
+                value_input_option="USER_ENTERED",
+            )
+            print(f"  ➕ {TRACKER_TAB}: extended header with {len(new_cols)} new column(s) → {new_cols}")
         else:
-            print(f"  🔧 {TRACKER_TAB}: existing tab, append-only (history preserved)")
+            print(
+                f"  ⚠️  {TRACKER_TAB}: existing header doesn't match TRACKER_HEADERS and isn't a "
+                f"prefix. History preserved as-is; new rows append in current schema and may be "
+                f"misaligned against the old header. Existing first row: {first_row}"
+            )
     except gspread.WorksheetNotFound:
         print(f"  ➕ {TRACKER_TAB}: creating new tab with header")
         ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(30, n_cols))
-        ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+        ws.update(
+            range_name=f"A1:{end_col}1",
+            values=[TRACKER_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
 
-    if not rows:
-        print(f"  ⚠️  {TRACKER_TAB}: no flagged rows to append")
+    if not tracker_rows:
+        print(f"  ⚠️  {TRACKER_TAB}: no ELITE/STRONG rows to append")
         return
 
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} flagged rows")
+    ws.append_rows(tracker_rows, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TRACKER_TAB}: appended {len(tracker_rows)} ELITE/STRONG rows")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
@@ -790,19 +868,19 @@ def main():
     rows  = build_rows(props, bpp, pitcher_hands)
 
     # Per-tab views drawn from the same row pool:
-    #  - Today  = ELITE/STRONG/LEAN only (cleared and rewritten daily)
-    #  - Bests  = ELITE/STRONG only      (cleared and rewritten daily)
-    #  - Tracker = every edge-flagged row from the full pool (append-only)
-    rated   = [r for r in rows if r[22] in ("ELITE", "STRONG", "LEAN")]
-    flagged = [r for r in rows if r[20]]  # Edge Flag at index 20
-    bests   = build_best_bets(rated)
+    #  - Today   = ELITE/STRONG/LEAN (cleared and rewritten daily, full HEADERS)
+    #  - Bests   = ELITE/STRONG      (cleared and rewritten daily, BEST_HEADERS)
+    #  - Tracker = ELITE/STRONG      (append-only history, TRACKER_HEADERS)
+    rated         = [r for r in rows if r[22] in ("ELITE", "STRONG", "LEAN")]
+    bests         = build_best_bets(rated)
+    tracker_rows  = build_tracker_rows(rows)
 
     sheet = get_sheet()
     write_today(sheet, rated)
-    append_tracker(sheet, flagged)
+    append_tracker(sheet, tracker_rows)
     write_best_bets(sheet, bests)
 
-    edges  = len(flagged)
+    edges  = sum(1 for r in rows if r[20])
     elite  = sum(1 for r in rated if r[-1] == "ELITE")
     strong = sum(1 for r in rated if r[-1] == "STRONG")
     lean   = sum(1 for r in rated if r[-1] == "LEAN")
@@ -810,7 +888,7 @@ def main():
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
         f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
-        f"Best Bets: {len(bests)} | Tracker append: {len(flagged)}"
+        f"Best Bets: {len(bests)} | Tracker append: {len(tracker_rows)}"
     )
 
 
