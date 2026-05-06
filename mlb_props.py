@@ -321,6 +321,7 @@ def build_rows(props, bpp, pitcher_hands):
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
+    debug_left = 3
     for p in props:
         rec = match_player(p["player"], bpp)
         if not rec:
@@ -341,6 +342,16 @@ def build_rows(props, bpp, pitcher_hands):
         matchup_label = f"{bs or '?'} vs {ph or '?'}"
         matchup       = matchup_score(bs, ph)
         composite     = composite_score(rec["p_hit"], edge_pct, matchup)
+
+        if debug_left > 0:
+            print(
+                f"  🐞 {p['player']} | "
+                f"p_hit={rec['p_hit']:.4f} (×100={rec['p_hit']*100:.2f}) | "
+                f"edge_pct={edge_pct:.2f} edge_score={edge_to_score(edge_pct):.2f} | "
+                f"stand={bs!r} opp={rec.get('opp')!r} ph={ph!r} matchup={matchup:.2f} | "
+                f"composite={composite:.2f}"
+            )
+            debug_left -= 1
 
         out.append([
             today,
