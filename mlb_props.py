@@ -33,6 +33,7 @@ from google.oauth2.service_account import Credentials
 # ── CONFIG ─────────────────────────────────────────────────────
 HERE              = os.path.dirname(os.path.abspath(__file__))
 BATTERS_FILE      = os.path.join(HERE, "ballparkpal_batters.xlsx")
+PITCHERS_FILE     = os.path.join(HERE, "ballparkpal_pitchers.xlsx")
 
 ODDS_API_KEY      = os.environ.get("ODDS_API_KEY", "")
 PROPS_SHEET_ID    = os.environ.get("PROPS_SHEET_ID", "")
@@ -107,7 +108,9 @@ def load_bpp_batters() -> dict:
     hit_col  = cols.get("hitprobability") or cols.get("hitprob")
     ab_col   = cols.get("atbats") or cols.get("ab")
     team_col = cols.get("team") or cols.get("teamabbr")
+    opp_col  = cols.get("opponent") or cols.get("opp")
     side_col = cols.get("side")
+    stand_col = cols.get("batterstand") or cols.get("bats") or cols.get("stand")
 
     if not (name_col and hit_col and ab_col):
         sys.exit(f"❌ BPP batters missing required columns. Have: {list(df.columns)}")
@@ -130,12 +133,41 @@ def load_bpp_batters() -> dict:
             continue
         out[normalize_name(raw_name)] = {
             "name":  raw_name,
-            "team":  str(row[team_col]).strip() if team_col else "",
-            "side":  row[side_col] if side_col else None,
+            "team":  str(row[team_col]).strip().upper() if team_col else "",
+            "opp":   str(row[opp_col]).strip().upper() if opp_col else "",
+            "side":  str(row[side_col]).strip() if side_col else "",
+            "stand": str(row[stand_col]).strip().upper() if stand_col else "",
             "p_hit": p_hit,
             "ab":    ab,
         }
     print(f"  ✅ BPP batters loaded: {len(out)}")
+    return out
+
+
+def load_bpp_pitcher_hands() -> dict:
+    """Map team-abbreviation -> starting pitcher's throwing hand (R/L).
+
+    Joined later on the batter's Opponent so we know which arm each batter
+    is facing. Returns {} silently if the file or columns are missing — the
+    matchup component will then default to neutral.
+    """
+    if not os.path.exists(PITCHERS_FILE):
+        print(f"  ⚠️  {PITCHERS_FILE} not found — matchup score will default to neutral")
+        return {}
+    df = pd.read_excel(PITCHERS_FILE, engine="openpyxl")
+    cols = {c.lower(): c for c in df.columns}
+    team_col = cols.get("team")
+    hand_col = cols.get("pitcherhand") or cols.get("throws") or cols.get("hand")
+    if not (team_col and hand_col):
+        print(f"  ⚠️  pitchers file missing Team/PitcherHand. Have: {list(df.columns)}")
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        team = str(row[team_col]).strip().upper()
+        hand = str(row[hand_col]).strip().upper()
+        if team and hand and team not in out:
+            out[team] = hand[0]  # first char only ('R'/'L')
+    print(f"  ✅ BPP pitcher hands loaded: {len(out)} teams")
     return out
 
 
@@ -239,26 +271,21 @@ def model_over_prob(p_game_hit: float, ab_raw: float, line: float) -> float:
 
 
 # ── COMPOSITE SCORING ──────────────────────────────────────────
-def parse_matchup_score(side_value) -> float:
-    """Convert BPP Side column to a 0-100 pitcher-matchup score.
+def matchup_score(batter_stand: str, pitcher_hand: str) -> float:
+    """0-100 batter-vs-pitcher handedness score.
 
-    BPP files often store Side as 'A'/'H' (away/home) — not a matchup quality.
-    If that's the case, we return a neutral 50. If the column is numeric,
-    0-1 is treated as a fraction (× 100); 0-100 is used as-is.
+    Same-hand matchup (R vs R, L vs L) favors the pitcher → low score.
+    Cross-hand (L vs R, R vs L) favors the batter → high score.
+    Switch hitters (S) always get the platoon side → cross-hand value.
+    Unknown / missing hands → neutral 50.
     """
-    if side_value is None:
+    bs = (batter_stand or "").strip().upper()[:1]
+    ph = (pitcher_hand or "").strip().upper()[:1]
+    if ph not in ("L", "R") or bs not in ("L", "R", "S"):
         return 50.0
-    try:
-        v = float(side_value)
-        if pd.isna(v):
-            return 50.0
-        if 0 <= v <= 1:
-            return v * 100.0
-        if 0 <= v <= 100:
-            return v
-    except (TypeError, ValueError):
-        pass
-    return 50.0
+    if bs == "S":
+        return 65.0
+    return 35.0 if bs == ph else 65.0
 
 
 def edge_to_score(edge_pct: float) -> float:
@@ -288,7 +315,7 @@ def match_player(prop_name: str, bpp: dict):
 
 
 # ── BUILD ROWS ─────────────────────────────────────────────────
-def build_rows(props, bpp):
+def build_rows(props, bpp, pitcher_hands):
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
@@ -305,9 +332,14 @@ def build_rows(props, bpp):
             continue
         imp  = implied_prob(p["price"])
         edge = model_p - imp
-        edge_pct  = edge * 100
-        matchup   = parse_matchup_score(rec.get("side"))
-        composite = composite_score(rec["p_hit"], edge_pct, matchup)
+        edge_pct = edge * 100
+
+        bs = rec.get("stand", "")
+        ph = pitcher_hands.get(rec.get("opp", ""), "")
+        matchup_label = f"{bs or '?'} vs {ph or '?'}"
+        matchup       = matchup_score(bs, ph)
+        composite     = composite_score(rec["p_hit"], edge_pct, matchup)
+
         out.append([
             today,
             p["player"],
@@ -320,7 +352,7 @@ def build_rows(props, bpp):
             round(imp * 100, 2),
             round(rec["p_hit"] * 100, 2),
             int(round(rec["ab"])),
-            str(rec.get("side")) if rec.get("side") is not None else "",
+            matchup_label,
             round(model_p * 100, 2),
             round(edge_pct, 2),
             "✅" if edge >= EDGE_THRESHOLD else "",
@@ -361,9 +393,10 @@ def append_tracker(sheet, rows):
 
 # ── MAIN ───────────────────────────────────────────────────────
 def main():
-    bpp   = load_bpp_batters()
-    props = get_batter_hits_props()
-    rows  = build_rows(props, bpp)
+    bpp           = load_bpp_batters()
+    pitcher_hands = load_bpp_pitcher_hands()
+    props         = get_batter_hits_props()
+    rows          = build_rows(props, bpp, pitcher_hands)
 
     sheet = get_sheet()
     write_today(sheet, rows)
