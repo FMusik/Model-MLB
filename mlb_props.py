@@ -413,23 +413,54 @@ def _get_or_create_ws(sheet, title, rows=1000, cols=20):
         return sheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+def _col_letter(n: int) -> str:
+    """1-indexed column number → letter (1='A', 26='Z', 27='AA')."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def write_today(sheet, rows):
+    end_col = _col_letter(len(HEADERS))
+    print(f"  🔧 HEADERS ({len(HEADERS)} cols): {HEADERS}")
     ws = _get_or_create_ws(sheet, TODAY_TAB)
     ws.clear()
-    # append_row hits row 1 reliably after a clear(); avoids any update()
-    # range-resolution quirk that was eating the header.
-    ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+    print(f"  🔧 {TODAY_TAB}: writing header → A1:{end_col}1")
+    ws.update(
+        range_name=f"A1:{end_col}1",
+        values=[HEADERS],
+        value_input_option="USER_ENTERED",
+    )
     if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        end_row = 1 + len(rows)
+        print(f"  🔧 {TODAY_TAB}: writing {len(rows)} rows → A2:{end_col}{end_row}")
+        ws.update(
+            range_name=f"A2:{end_col}{end_row}",
+            values=rows,
+            value_input_option="USER_ENTERED",
+        )
     print(f"  ✅ {TODAY_TAB}: header + {len(rows)} rows")
 
 
 def append_tracker(sheet, rows):
-    ws = _get_or_create_ws(sheet, TRACKER_TAB, rows=10000)
-    existing = ws.get_all_values()
-    if not existing:
+    print(f"  🔧 HEADERS ({len(HEADERS)} cols): {HEADERS}")
+    try:
+        ws = sheet.worksheet(TRACKER_TAB)
+        existing = ws.get_all_values()
+        print(f"  🔧 {TRACKER_TAB}: found existing tab, {len(existing)} rows")
+        first_row = existing[0] if existing else []
+        if first_row[:1] != HEADERS[:1]:  # row 1 doesn't start with "Date"
+            print(f"  ➕ {TRACKER_TAB}: row 1 isn't header — inserting header at top")
+            ws.insert_row(HEADERS, index=1, value_input_option="USER_ENTERED")
+        else:
+            print(f"  🔧 {TRACKER_TAB}: header already present in row 1")
+    except gspread.WorksheetNotFound:
+        print(f"  ➕ {TRACKER_TAB}: tab missing — creating with header")
+        ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(20, len(HEADERS)))
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
-        print(f"  ➕ {TRACKER_TAB}: wrote header (was empty)")
+
     if rows:
         ws.append_rows(rows, value_input_option="USER_ENTERED")
         print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} rows")
