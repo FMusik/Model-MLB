@@ -300,11 +300,17 @@ def composite_score(hit_prob: float, edge_pct: float, matchup: float) -> float:
     return 0.5 * (hit_prob * 100.0) + 0.3 * edge_to_score(edge_pct) + 0.2 * matchup
 
 
-def rating_label(score: float) -> str:
-    if score >= 90: return "ELITE"
-    if score >= 75: return "STRONG"
-    if score >= 60: return "LEAN"
-    return "skip"
+def _percentile(sorted_scores, p):
+    """Linear-interpolated percentile (0-100). `sorted_scores` must be sorted ascending."""
+    if not sorted_scores:
+        return 0.0
+    if len(sorted_scores) == 1:
+        return sorted_scores[0]
+    k    = (len(sorted_scores) - 1) * p / 100
+    lo   = int(k)
+    hi   = min(lo + 1, len(sorted_scores) - 1)
+    frac = k - lo
+    return sorted_scores[lo] + frac * (sorted_scores[hi] - sorted_scores[lo])
 
 
 # ── MATCHING ───────────────────────────────────────────────────
@@ -321,7 +327,6 @@ def build_rows(props, bpp, pitcher_hands):
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
-    debug_left = 3
     for p in props:
         rec = match_player(p["player"], bpp)
         if not rec:
@@ -343,16 +348,6 @@ def build_rows(props, bpp, pitcher_hands):
         matchup       = matchup_score(bs, ph)
         composite     = composite_score(rec["p_hit"], edge_pct, matchup)
 
-        if debug_left > 0:
-            print(
-                f"  🐞 {p['player']} | "
-                f"p_hit={rec['p_hit']:.4f} (×100={rec['p_hit']*100:.2f}) | "
-                f"edge_pct={edge_pct:.2f} edge_score={edge_to_score(edge_pct):.2f} | "
-                f"stand={bs!r} opp={rec.get('opp')!r} ph={ph!r} matchup={matchup:.2f} | "
-                f"composite={composite:.2f}"
-            )
-            debug_left -= 1
-
         out.append([
             today,
             p["player"],
@@ -371,10 +366,36 @@ def build_rows(props, bpp, pitcher_hands):
             "✅" if edge >= EDGE_THRESHOLD else "",
             round(matchup, 2),
             round(composite, 2),
-            rating_label(composite),
+            "",  # rating assigned below by percentile
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
+
+    # Assign ratings by percentile of today's composite-score distribution.
+    # ELITE = top 10%, STRONG = next 20%, LEAN = next 30%, rest dropped.
+    if out:
+        scores = sorted(r[16] for r in out)
+        cut_elite  = _percentile(scores, 90)
+        cut_strong = _percentile(scores, 70)
+        cut_lean   = _percentile(scores, 40)
+        print(
+            f"  🎯 Rating cutoffs — ELITE >= {cut_elite:.2f}, "
+            f"STRONG >= {cut_strong:.2f}, LEAN >= {cut_lean:.2f}"
+        )
+        kept = []
+        for r in out:
+            s = r[16]
+            if s >= cut_elite:
+                r[17] = "ELITE"
+            elif s >= cut_strong:
+                r[17] = "STRONG"
+            elif s >= cut_lean:
+                r[17] = "LEAN"
+            else:
+                continue
+            kept.append(r)
+        out = kept
+
     out.sort(key=lambda r: r[16], reverse=True)  # sort by Composite Score
     return out
 
