@@ -32,6 +32,9 @@ if "sign out" not in login.text.lower():
 
 print("✅ Logged in!")
 
+XLSX_MAGIC = b"PK\x03\x04"  # xlsx is a zip archive — must start with this signature
+
+failures = []
 for url, filename in [
     (GAMES_URL,    "ballparkpal_games.xlsx"),
     (PITCHERS_URL, "ballparkpal_pitchers.xlsx"),
@@ -40,12 +43,34 @@ for url, filename in [
 ]:
     print(f"📥 Downloading {filename}...")
     r = session.get(url)
-    if r.status_code == 200:
-        with open(filename, "wb") as f:
-            f.write(r.content)
-        print(f"✅ Saved {filename} ({len(r.content):,} bytes)")
-    else:
-        print(f"⚠️  Failed {filename}: {r.status_code}")
+    if r.status_code != 200:
+        msg = f"HTTP {r.status_code}"
+        print(f"❌ Failed {filename}: {msg}")
+        failures.append((filename, msg))
+        continue
+
+    body = r.content
+    ctype = (r.headers.get("Content-Type") or "").lower()
+
+    if not body.startswith(XLSX_MAGIC):
+        preview = body[:200].decode("utf-8", errors="replace").strip().replace("\n", " ")
+        msg = (
+            f"not an xlsx — got Content-Type={ctype!r}, "
+            f"size={len(body):,} bytes, body starts with: {preview!r}"
+        )
+        print(f"❌ Failed {filename}: {msg}")
+        failures.append((filename, msg))
+        continue
+
+    with open(filename, "wb") as f:
+        f.write(body)
+    print(f"✅ Saved {filename} ({len(body):,} bytes, Content-Type={ctype})")
+
+if failures:
+    print(f"\n❌ {len(failures)} download(s) failed:")
+    for fname, msg in failures:
+        print(f"   - {fname}: {msg}")
+    sys.exit(1)
 
 import pandas as pd
 
