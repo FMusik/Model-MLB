@@ -219,6 +219,8 @@ def load_bpp_pitcher_hands() -> dict:
         if team and hand and team not in out:
             out[team] = hand[0]  # first char only ('R'/'L')
     print(f"  ✅ BPP pitcher hands loaded: {len(out)} teams")
+    sample = list(out.items())[:5]
+    print(f"  🔧 First 5 pitcher_hands entries: {sample}")
     return out
 
 
@@ -574,14 +576,8 @@ def build_rows(props, bpp, pitcher_hands):
         matchup_counter[int(matchup)] += 1
         composite     = composite_score(blended, edge_pct, matchup)
 
-        # Trace first 10 rows + flag any same-hand row that didn't return 35.
-        if len(out) < 10 or (bs == ph and bs in ("L", "R") and matchup != 35.0):
-            print(
-                f"  🐞 {p['player']!s:25} | "
-                f"bs_raw={bs_raw!r} ph_raw={ph_raw!r} | "
-                f"bs={bs!r} ph={ph!r} | "
-                f"matchup={matchup}"
-            )
+        # Per-player matchup trace (raw inputs + result, every prop)
+        print(f"{p['player']}: bs={bs_raw!r} ph={ph_raw!r} → matchup={matchup}")
 
         out.append([
             today,
