@@ -19,9 +19,22 @@ jobs:
       - name: Install dependencies
         run: pip install gspread google-auth requests pandas numpy scipy openpyxl
 
+      - name: Write credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Fetch BallparkPal data
+        run: python fetch_ballparkpal.py
+        env:
+          BP_EMAIL:    ${{ secrets.BP_EMAIL }}
+          BP_PASSWORD: ${{ secrets.BP_PASSWORD }}
+
       - name: Run MLB props model
         run: python mlb_props.py
         env:
           ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
           PROPS_SHEET_ID:     ${{ secrets.PROPS_SHEET_ID }}
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
