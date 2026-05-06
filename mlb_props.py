@@ -102,7 +102,7 @@ def load_bpp_batters() -> dict:
     cols = {c.lower(): c for c in df.columns}
 
     name_col = next(
-        (cols[k] for k in ("player", "name", "playername", "batter") if k in cols),
+        (cols[k] for k in ("fullname", "player", "name", "playername", "batter") if k in cols),
         None,
     )
     hit_col  = cols.get("hitprobability") or cols.get("hitprob")
