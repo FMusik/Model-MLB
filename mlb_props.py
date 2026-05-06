@@ -70,7 +70,7 @@ HEADERS = [
     "Career BA", "Season BA", "L20 BA", "Weighted BA", "Model Prob",
     "Matchup",
     "Model Prob %", "Edge %", "Edge Flag",
-    "Matchup Score", "Composite Score", "Rating",
+    "Composite Score", "Rating",
 ]
 
 BEST_HEADERS = [
@@ -461,41 +461,14 @@ def model_over_prob(p_game_hit: float, ab_raw: float, line: float) -> float:
 
 
 # ── COMPOSITE SCORING ──────────────────────────────────────────
-def matchup_score(batter_stand: str, pitcher_hand: str) -> float:
-    """0-100 batter-vs-pitcher handedness score.
+def composite_score(hit_pct_rank: float, edge_pct_rank: float) -> float:
+    """60% BPP HitProb percentile rank + 40% edge percentile rank.
 
-    Same-hand matchup (R vs R, L vs L) favors the pitcher → low score.
-    Cross-hand (L vs R, R vs L) favors the batter → high score.
-    Switch hitters (S) always get the platoon side → cross-hand value.
-    Unknown / missing hands → neutral 50.
+    Both inputs are percentile ranks (0–100) computed across today's pool
+    of priced players, so composite naturally spans ~0–100 regardless of
+    how tightly the underlying BPP/edge values cluster.
     """
-    bs = (batter_stand or "").strip().upper()[:1]
-    ph = (pitcher_hand or "").strip().upper()[:1]
-    if ph not in ("L", "R") or bs not in ("L", "R", "S"):
-        return 50.0
-    if bs == "S":
-        return 65.0
-    return 35.0 if bs == ph else 65.0
-
-
-# Startup self-test — fails loudly if the function ever regresses.
-assert matchup_score("R", "R") == 35.0, "matchup_score broken: R vs R"
-assert matchup_score("L", "L") == 35.0, "matchup_score broken: L vs L"
-assert matchup_score("R", "L") == 65.0, "matchup_score broken: R vs L"
-assert matchup_score("L", "R") == 65.0, "matchup_score broken: L vs R"
-assert matchup_score("S", "R") == 65.0, "matchup_score broken: S vs R"
-assert matchup_score("",  "R") == 50.0, "matchup_score broken: empty bs"
-assert matchup_score("R", "")  == 50.0, "matchup_score broken: empty ph"
-
-
-def edge_to_score(edge_pct: float) -> float:
-    """Map edge %  to a 0-100 score. 0% edge = 50, ±20% saturates to 100/0."""
-    return max(0.0, min(100.0, 50.0 + edge_pct * 2.5))
-
-
-def composite_score(hit_prob: float, edge_pct: float, matchup: float) -> float:
-    """50% BPP HitProb, 30% edge vs market, 20% pitcher matchup."""
-    return 0.5 * (hit_prob * 100.0) + 0.3 * edge_to_score(edge_pct) + 0.2 * matchup
+    return 0.60 * hit_pct_rank + 0.40 * edge_pct_rank
 
 
 def _percentile(sorted_scores, p):
@@ -525,12 +498,11 @@ def build_rows(props, bpp, pitcher_hands):
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
-    bs_ph_counter   = Counter()
-    matchup_counter = Counter()
-    stats_session   = requests.Session()
-    stats_cache     = {}
-    stats_hits      = 0  # players with at least one BA component
-    stats_total     = 0  # unique players we tried to fetch
+    bs_ph_counter = Counter()
+    stats_session = requests.Session()
+    stats_cache   = {}
+    stats_hits    = 0  # players with at least one BA component
+    stats_total   = 0  # unique players we tried to fetch
     for p in props:
         rec = match_player(p["player"], bpp)
         if not rec:
@@ -573,11 +545,6 @@ def build_rows(props, bpp, pitcher_hands):
         ph = (ph_raw or "").strip().upper()[:1] or "?"
         bs_ph_counter[(bs, ph)] += 1
         matchup_label = f"{bs} vs {ph}"
-        matchup       = matchup_score(bs_raw, ph_raw)
-        matchup_counter[int(matchup)] += 1
-        # Composite is computed in a post-pass below using percentile rank of
-        # the blended hit prob — placeholder 0 here, overwritten before sort.
-        composite     = 0.0
 
         out.append([
             today,
@@ -601,9 +568,8 @@ def build_rows(props, bpp, pitcher_hands):
             round(model_p * 100, 2),
             round(edge_pct, 2),
             "✅" if edge >= EDGE_THRESHOLD else "",
-            round(matchup, 2),
-            round(composite, 2),
-            "",  # rating assigned below by rank
+            0.0,   # composite placeholder, filled by the percentile post-pass
+            "",    # rating assigned below by rank
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -621,33 +587,31 @@ def build_rows(props, bpp, pitcher_hands):
             f"R vs R: {rr}, R vs L: {rl}, L vs R: {lr}, L vs L: {ll}, S: {s_count}"
         )
 
-    # Recompute composite using percentile RANKS of today's pool.
-    # BPP HitProbability sits in a narrow 0.24–0.76 band and Edge % in a
-    # similarly tight range, so raw-scaled scores produce almost no spread.
-    # Ranking against the day's distribution forces the full 0–100 range.
-    #   r[10] = BPP HitProb %   r[19] = Edge %
-    #   r[21] = Matchup Score   r[22] = Composite Score (target)
+    # Composite from percentile RANKS of today's pool: 60% hit prob, 40% edge.
+    # Both BPP HitProbability (0.24–0.76 band) and Edge % cluster too tightly
+    # for raw-scaled scores to produce real spread; ranking against the day's
+    # distribution forces the full 0–100 range.
+    #   r[10] = BPP HitProb %   r[19] = Edge %   r[21] = Composite Score (target)
     if out:
         sorted_hit  = sorted(r[10] for r in out)
         sorted_edge = sorted(r[19] for r in out)
         n           = len(out)
         for r in out:
-            hit_pr    = 100.0 * bisect_right(sorted_hit,  r[10]) / n
-            edge_pr   = 100.0 * bisect_right(sorted_edge, r[19]) / n
-            composite = 0.50 * hit_pr + 0.30 * edge_pr + 0.20 * r[21]
-            r[22]     = round(composite, 2)
+            hit_pr  = 100.0 * bisect_right(sorted_hit,  r[10]) / n
+            edge_pr = 100.0 * bisect_right(sorted_edge, r[19]) / n
+            r[21]   = round(composite_score(hit_pr, edge_pr), 2)
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
-    # bottom 40% dropped. Composite is at column index 22, rating at 23.
+    # bottom 40% dropped. Composite is at column index 21, rating at 22.
     if out:
-        out.sort(key=lambda r: r[22], reverse=True)
+        out.sort(key=lambda r: r[21], reverse=True)
         n = len(out)
         elite_end  = max(1, int(round(n * 0.10)))
         strong_end = elite_end  + max(0, int(round(n * 0.15)))
         lean_end   = strong_end + max(0, int(round(n * 0.35)))
 
-        scores = [r[22] for r in out]
+        scores = [r[21] for r in out]
         print(
             f"  📊 Composite distribution — n={n} "
             f"min={scores[-1]:.2f} median={scores[n // 2]:.2f} max={scores[0]:.2f}"
@@ -661,9 +625,9 @@ def build_rows(props, bpp, pitcher_hands):
 
         kept = []
         for i, r in enumerate(out):
-            if   i < elite_end:  r[23] = "ELITE"
-            elif i < strong_end: r[23] = "STRONG"
-            elif i < lean_end:   r[23] = "LEAN"
+            if   i < elite_end:  r[22] = "ELITE"
+            elif i < strong_end: r[22] = "STRONG"
+            elif i < lean_end:   r[22] = "LEAN"
             else: break  # remainder dropped
             kept.append(r)
         out = kept
@@ -682,11 +646,11 @@ def build_best_bets(rows):
     Column indices used (against current HEADERS):
       1=Game Time, 2=Player, 3=Team, 5=Line, 6=Side,
       7=Bookmaker, 8=Odds, 10=BPP HitProb %, 17=Matchup,
-      18=Model Prob %, 19=Edge %, 22=Composite, 23=Rating
+      18=Model Prob %, 19=Edge %, 21=Composite, 22=Rating
     """
     by_player = {}
     for r in rows:
-        if r[23] not in ("ELITE", "STRONG"):
+        if r[22] not in ("ELITE", "STRONG"):
             continue
         key = r[2]
         if key not in by_player or r[19] > by_player[key][19]:
@@ -706,8 +670,8 @@ def build_best_bets(rows):
             r[10],  # BPP Hit%
             r[18],  # Model Prob%
             r[19],  # Edge%
-            r[23],  # Rating
-            r[22],  # Composite Score
+            r[22],  # Rating
+            r[21],  # Composite Score
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological.
