@@ -389,6 +389,16 @@ def matchup_score(batter_stand: str, pitcher_hand: str) -> float:
     return 35.0 if bs == ph else 65.0
 
 
+# Startup self-test — fails loudly if the function ever regresses.
+assert matchup_score("R", "R") == 35.0, "matchup_score broken: R vs R"
+assert matchup_score("L", "L") == 35.0, "matchup_score broken: L vs L"
+assert matchup_score("R", "L") == 65.0, "matchup_score broken: R vs L"
+assert matchup_score("L", "R") == 65.0, "matchup_score broken: L vs R"
+assert matchup_score("S", "R") == 65.0, "matchup_score broken: S vs R"
+assert matchup_score("",  "R") == 50.0, "matchup_score broken: empty bs"
+assert matchup_score("R", "")  == 50.0, "matchup_score broken: empty ph"
+
+
 def edge_to_score(edge_pct: float) -> float:
     """Map edge %  to a 0-100 score. 0% edge = 50, ±20% saturates to 100/0."""
     return max(0.0, min(100.0, 50.0 + edge_pct * 2.5))
@@ -477,6 +487,15 @@ def build_rows(props, bpp, pitcher_hands):
         matchup       = matchup_score(bs_raw, ph_raw)
         matchup_counter[int(matchup)] += 1
         composite     = composite_score(blended, edge_pct, matchup)
+
+        # Trace first 10 rows + flag any same-hand row that didn't return 35.
+        if len(out) < 10 or (bs == ph and bs in ("L", "R") and matchup != 35.0):
+            print(
+                f"  🐞 {p['player']!s:25} | "
+                f"bs_raw={bs_raw!r} ph_raw={ph_raw!r} | "
+                f"bs={bs!r} ph={ph!r} | "
+                f"matchup={matchup}"
+            )
 
         out.append([
             today,
