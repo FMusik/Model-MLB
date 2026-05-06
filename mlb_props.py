@@ -25,6 +25,12 @@ import unicodedata
 import difflib
 from collections import Counter
 
+try:
+    from zoneinfo import ZoneInfo
+    ET_ZONE = ZoneInfo("America/New_York")
+except Exception:
+    ET_ZONE = None
+
 import requests
 import pandas as pd
 import gspread
@@ -54,9 +60,10 @@ BLEND_BA          = 0.30   # weight on BA-derived hit prob in final blend
 
 TODAY_TAB         = "Props Today"
 TRACKER_TAB       = "Props Tracker"
+BEST_TAB          = "🎯 Best Bets"
 
 HEADERS = [
-    "Date", "Player", "Team", "Game", "Line", "Side",
+    "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
     "Bookmaker", "Odds", "Implied %",
     "BPP HitProb %", "BPP AtBats",
     "Career BA", "Season BA", "L20 BA", "Weighted BA", "Model Prob",
@@ -64,6 +71,28 @@ HEADERS = [
     "Model Prob %", "Edge %", "Edge Flag",
     "Matchup Score", "Composite Score", "Rating",
 ]
+
+BEST_HEADERS = [
+    "Game Time", "Player", "Team", "Matchup", "Line", "Side",
+    "Best Odds", "Best Book", "BPP Hit%", "Model Prob%", "Edge%",
+    "Rating", "Composite Score",
+]
+
+
+def format_game_time(iso_str: str) -> str:
+    """Convert ISO UTC commence_time to 24-hour ET display (e.g. '19:35')."""
+    if not iso_str:
+        return ""
+    try:
+        s  = iso_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        if ET_ZONE:
+            dt = dt.astimezone(ET_ZONE)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return iso_str
 
 
 # ── GOOGLE SHEETS AUTH ─────────────────────────────────────────
@@ -293,6 +322,7 @@ def get_batter_hits_props():
             continue
 
         game = f"{ev.get('away_team','')} @ {ev.get('home_team','')}"
+        commence = ev.get("commence_time", "")
         for book in data.get("bookmakers", []) if isinstance(data, dict) else []:
             bk_key = book.get("key", "")
             for mkt in book.get("markets", []):
@@ -312,6 +342,7 @@ def get_batter_hits_props():
                         "price":     int(price),
                         "bookmaker": bk_key,
                         "game":      game,
+                        "game_time": commence,
                     })
     print(f"   ✅ {len(rows)} prop quotes pulled (requests remaining: {remaining})")
     return rows
@@ -554,6 +585,7 @@ def build_rows(props, bpp, pitcher_hands):
 
         out.append([
             today,
+            format_game_time(p.get("game_time", "")),
             p["player"],
             rec.get("team", ""),
             p["game"],
@@ -588,15 +620,15 @@ def build_rows(props, bpp, pitcher_hands):
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
-    # bottom 40% dropped. Composite is at column index 21, rating at 22.
+    # bottom 40% dropped. Composite is at column index 22, rating at 23.
     if out:
-        out.sort(key=lambda r: r[21], reverse=True)
+        out.sort(key=lambda r: r[22], reverse=True)
         n = len(out)
         elite_end  = max(1, int(round(n * 0.10)))
         strong_end = elite_end  + max(0, int(round(n * 0.15)))
         lean_end   = strong_end + max(0, int(round(n * 0.35)))
 
-        scores = [r[21] for r in out]
+        scores = [r[22] for r in out]
         print(
             f"  📊 Composite distribution — n={n} "
             f"min={scores[-1]:.2f} median={scores[n // 2]:.2f} max={scores[0]:.2f}"
@@ -610,14 +642,80 @@ def build_rows(props, bpp, pitcher_hands):
 
         kept = []
         for i, r in enumerate(out):
-            if   i < elite_end:  r[22] = "ELITE"
-            elif i < strong_end: r[22] = "STRONG"
-            elif i < lean_end:   r[22] = "LEAN"
+            if   i < elite_end:  r[23] = "ELITE"
+            elif i < strong_end: r[23] = "STRONG"
+            elif i < lean_end:   r[23] = "LEAN"
             else: break  # remainder dropped
             kept.append(r)
         out = kept
 
     return out
+
+
+# ── BEST BETS ──────────────────────────────────────────────────
+def build_best_bets(rows):
+    """Distill the full prop list into one row per ELITE/STRONG player.
+
+    For each player we keep the prop with the highest Edge % across all
+    bookmakers and lines, then sort the result by Game Time ASC and
+    Composite Score DESC.
+
+    Column indices used (against current HEADERS):
+      1=Game Time, 2=Player, 3=Team, 5=Line, 6=Side,
+      7=Bookmaker, 8=Odds, 10=BPP HitProb %, 17=Matchup,
+      18=Model Prob %, 19=Edge %, 22=Composite, 23=Rating
+    """
+    by_player = {}
+    for r in rows:
+        if r[23] not in ("ELITE", "STRONG"):
+            continue
+        key = r[2]
+        if key not in by_player or r[19] > by_player[key][19]:
+            by_player[key] = r
+
+    bests = []
+    for r in by_player.values():
+        bests.append([
+            r[1],   # Game Time
+            r[2],   # Player
+            r[3],   # Team
+            r[17],  # Matchup
+            r[5],   # Line
+            r[6],   # Side
+            r[8],   # Best Odds
+            r[7],   # Best Book
+            r[10],  # BPP Hit%
+            r[18],  # Model Prob%
+            r[19],  # Edge%
+            r[23],  # Rating
+            r[22],  # Composite Score
+        ])
+    # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
+    # (24-hour ET) so lexicographic sort is chronological.
+    bests.sort(key=lambda b: (b[0], -b[12]))
+    return bests
+
+
+def write_best_bets(sheet, best_rows):
+    end_col = _col_letter(len(BEST_HEADERS))
+    print(f"  🔧 BEST_HEADERS ({len(BEST_HEADERS)} cols): {BEST_HEADERS}")
+    ws = _get_or_create_ws(sheet, BEST_TAB, cols=max(30, len(BEST_HEADERS)))
+    ws.clear()
+    print(f"  🔧 {BEST_TAB}: writing header → A1:{end_col}1")
+    ws.update(
+        range_name=f"A1:{end_col}1",
+        values=[BEST_HEADERS],
+        value_input_option="USER_ENTERED",
+    )
+    if best_rows:
+        end_row = 1 + len(best_rows)
+        print(f"  🔧 {BEST_TAB}: writing {len(best_rows)} rows → A2:{end_col}{end_row}")
+        ws.update(
+            range_name=f"A2:{end_col}{end_row}",
+            values=best_rows,
+            value_input_option="USER_ENTERED",
+        )
+    print(f"  ✅ {BEST_TAB}: header + {len(best_rows)} rows")
 
 
 # ── SHEET WRITES ───────────────────────────────────────────────
@@ -731,18 +829,22 @@ def main():
     props         = get_batter_hits_props()
     rows          = build_rows(props, bpp, pitcher_hands)
 
+    bests = build_best_bets(rows)
+
     sheet = get_sheet()
     write_today(sheet, rows)
     append_tracker(sheet, rows)
+    write_best_bets(sheet, bests)
 
-    edges  = sum(1 for r in rows if r[19])
+    edges  = sum(1 for r in rows if r[20])
     elite  = sum(1 for r in rows if r[-1] == "ELITE")
     strong = sum(1 for r in rows if r[-1] == "STRONG")
     lean   = sum(1 for r in rows if r[-1] == "LEAN")
     print(
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
-        f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean}"
+        f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
+        f"Best Bets: {len(bests)}"
     )
 
 
