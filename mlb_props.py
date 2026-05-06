@@ -193,6 +193,61 @@ def load_bpp_pitcher_hands() -> dict:
     return out
 
 
+# ── CONFIRMED LINEUPS ──────────────────────────────────────────
+def fetch_confirmed_lineups():
+    """Pull today's confirmed lineups from the MLB Stats API.
+
+    Returns (names: set[str], ids: set[str]). Both empty means no lineups
+    have been posted yet (early-morning run) — callers should fall back to
+    using every BPP batter with a warning.
+    """
+    today = datetime.date.today().isoformat()
+    try:
+        r = requests.get(
+            f"{MLB_STATS_BASE}/schedule",
+            params={"sportId": 1, "date": today, "hydrate": "lineups"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"  ⚠️  Lineups fetch failed: HTTP {r.status_code}")
+            return set(), set()
+        data = r.json()
+    except Exception as e:
+        print(f"  ⚠️  Lineups fetch error: {e}")
+        return set(), set()
+
+    names, ids = set(), set()
+    games_with_lineups = 0
+    for date_block in data.get("dates", []):
+        for game in date_block.get("games", []):
+            lineups = game.get("lineups") or {}
+            had = False
+            for side_key in ("homePlayers", "awayPlayers"):
+                for player in lineups.get(side_key) or []:
+                    nm  = player.get("fullName") or ""
+                    pid = player.get("id")
+                    if nm:
+                        names.add(normalize_name(nm))
+                        had = True
+                    if pid is not None:
+                        ids.add(str(pid))
+            if had:
+                games_with_lineups += 1
+    print(f"  ✅ Confirmed lineups loaded: {games_with_lineups} games, {len(names)} batters")
+    return names, ids
+
+
+def filter_to_confirmed(bpp: dict, names: set, ids: set) -> dict:
+    """Return only the BPP batters whose name or PlayerId appears in lineups."""
+    if not names and not ids:
+        return bpp
+    return {
+        key: rec
+        for key, rec in bpp.items()
+        if key in names or (rec.get("player_id") and rec["player_id"] in ids)
+    }
+
+
 # ── ODDS API ───────────────────────────────────────────────────
 def get_batter_hits_props():
     if not ODDS_API_KEY:
@@ -662,6 +717,17 @@ def append_tracker(sheet, rows):
 def main():
     bpp           = load_bpp_batters()
     pitcher_hands = load_bpp_pitcher_hands()
+
+    # Confirmed lineup filter — early runs (no lineups yet) keep all BPP
+    # batters; later runs trim to only players in posted lineups.
+    confirmed_names, confirmed_ids = fetch_confirmed_lineups()
+    if confirmed_names or confirmed_ids:
+        before = len(bpp)
+        bpp = filter_to_confirmed(bpp, confirmed_names, confirmed_ids)
+        print(f"  ✅ Confirmed lineup filter: {len(bpp)}/{before} BPP batters in posted lineups")
+    else:
+        print(f"  ⚠️  No confirmed lineups yet — using all {len(bpp)} BPP batters")
+
     props         = get_batter_hits_props()
     rows          = build_rows(props, bpp, pitcher_hands)
 
