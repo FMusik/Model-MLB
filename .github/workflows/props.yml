@@ -31,9 +31,8 @@ jobs:
       - name: Run MLB props model
         run: python mlb_props.py
         env:
-          ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
-          PROPS_SHEET_ID:     ${{ secrets.PROPS_SHEET_ID }}
-          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+          ODDS_API_KEY:   ${{ secrets.ODDS_API_KEY }}
+          PROPS_SHEET_ID: ${{ secrets.PROPS_SHEET_ID }}
 
       - name: Cleanup credentials
         if: always()
