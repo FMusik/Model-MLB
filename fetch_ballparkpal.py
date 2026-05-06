@@ -11,6 +11,7 @@ LOGIN_URL    = "https://www.ballparkpal.com/LogIn.php"
 GAMES_URL    = f"https://www.ballparkpal.com/ExportGames.php?date={DATE}"
 PITCHERS_URL = f"https://www.ballparkpal.com/ExportPitchers.php?date={DATE}"
 TEAMS_URL    = f"https://www.ballparkpal.com/ExportTeams.php?date={DATE}"
+BATTERS_URL  = f"https://www.ballparkpal.com/ExportBatters.php?date={DATE}"
 
 session = requests.Session()
 session.headers.update({
@@ -35,6 +36,7 @@ for url, filename in [
     (GAMES_URL,    "ballparkpal_games.xlsx"),
     (PITCHERS_URL, "ballparkpal_pitchers.xlsx"),
     (TEAMS_URL,    "ballparkpal_teams.xlsx"),
+    (BATTERS_URL,  "ballparkpal_batters.xlsx"),
 ]:
     print(f"📥 Downloading {filename}...")
     r = session.get(url)
