@@ -1,0 +1,27 @@
+name: MLB Props
+
+on:
+  schedule:
+    - cron: '30 15 * * *'   # 11:30 AM ET (EDT) / 10:30 AM ET (EST)
+  workflow_dispatch:
+
+jobs:
+  run-props:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install gspread google-auth requests pandas numpy scipy openpyxl
+
+      - name: Run MLB props model
+        run: python mlb_props.py
+        env:
+          ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+          PROPS_SHEET_ID:     ${{ secrets.PROPS_SHEET_ID }}
+          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
