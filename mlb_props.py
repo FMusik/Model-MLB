@@ -49,8 +49,9 @@ TRACKER_TAB       = "Props Tracker"
 HEADERS = [
     "Date", "Player", "Team", "Game", "Line", "Side",
     "Bookmaker", "Odds", "Implied %",
-    "BPP HitProb %", "BPP AtBats",
+    "BPP HitProb %", "BPP AtBats", "Matchup",
     "Model Prob %", "Edge %", "Edge Flag",
+    "Matchup Score", "Composite Score", "Rating",
 ]
 
 
@@ -106,6 +107,7 @@ def load_bpp_batters() -> dict:
     hit_col  = cols.get("hitprobability") or cols.get("hitprob")
     ab_col   = cols.get("atbats") or cols.get("ab")
     team_col = cols.get("team") or cols.get("teamabbr")
+    side_col = cols.get("side")
 
     if not (name_col and hit_col and ab_col):
         sys.exit(f"❌ BPP batters missing required columns. Have: {list(df.columns)}")
@@ -129,6 +131,7 @@ def load_bpp_batters() -> dict:
         out[normalize_name(raw_name)] = {
             "name":  raw_name,
             "team":  str(row[team_col]).strip() if team_col else "",
+            "side":  row[side_col] if side_col else None,
             "p_hit": p_hit,
             "ab":    ab,
         }
@@ -235,6 +238,46 @@ def model_over_prob(p_game_hit: float, ab_raw: float, line: float) -> float:
     return max(0.0, min(1.0, 1 - cdf))
 
 
+# ── COMPOSITE SCORING ──────────────────────────────────────────
+def parse_matchup_score(side_value) -> float:
+    """Convert BPP Side column to a 0-100 pitcher-matchup score.
+
+    BPP files often store Side as 'A'/'H' (away/home) — not a matchup quality.
+    If that's the case, we return a neutral 50. If the column is numeric,
+    0-1 is treated as a fraction (× 100); 0-100 is used as-is.
+    """
+    if side_value is None:
+        return 50.0
+    try:
+        v = float(side_value)
+        if pd.isna(v):
+            return 50.0
+        if 0 <= v <= 1:
+            return v * 100.0
+        if 0 <= v <= 100:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return 50.0
+
+
+def edge_to_score(edge_pct: float) -> float:
+    """Map edge %  to a 0-100 score. 0% edge = 50, ±20% saturates to 100/0."""
+    return max(0.0, min(100.0, 50.0 + edge_pct * 2.5))
+
+
+def composite_score(hit_prob: float, edge_pct: float, matchup: float) -> float:
+    """50% BPP HitProb, 30% edge vs market, 20% pitcher matchup."""
+    return 0.5 * (hit_prob * 100.0) + 0.3 * edge_to_score(edge_pct) + 0.2 * matchup
+
+
+def rating_label(score: float) -> str:
+    if score >= 90: return "ELITE"
+    if score >= 75: return "STRONG"
+    if score >= 60: return "LEAN"
+    return "skip"
+
+
 # ── MATCHING ───────────────────────────────────────────────────
 def match_player(prop_name: str, bpp: dict):
     key = normalize_name(prop_name)
@@ -262,6 +305,9 @@ def build_rows(props, bpp):
             continue
         imp  = implied_prob(p["price"])
         edge = model_p - imp
+        edge_pct  = edge * 100
+        matchup   = parse_matchup_score(rec.get("side"))
+        composite = composite_score(rec["p_hit"], edge_pct, matchup)
         out.append([
             today,
             p["player"],
@@ -274,13 +320,17 @@ def build_rows(props, bpp):
             round(imp * 100, 2),
             round(rec["p_hit"] * 100, 2),
             int(round(rec["ab"])),
+            str(rec.get("side")) if rec.get("side") is not None else "",
             round(model_p * 100, 2),
-            round(edge * 100, 2),
+            round(edge_pct, 2),
             "✅" if edge >= EDGE_THRESHOLD else "",
+            round(matchup, 2),
+            round(composite, 2),
+            rating_label(composite),
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
-    out.sort(key=lambda r: r[12], reverse=True)  # sort by Edge %
+    out.sort(key=lambda r: r[16], reverse=True)  # sort by Composite Score
     return out
 
 
@@ -319,8 +369,15 @@ def main():
     write_today(sheet, rows)
     append_tracker(sheet, rows)
 
-    edges = sum(1 for r in rows if r[-1])
-    print(f"\n🎯 Done — {len(rows)} priced props, {edges} flagged edges >= {int(EDGE_THRESHOLD*100)}%")
+    edges  = sum(1 for r in rows if r[14])
+    elite  = sum(1 for r in rows if r[-1] == "ELITE")
+    strong = sum(1 for r in rows if r[-1] == "STRONG")
+    lean   = sum(1 for r in rows if r[-1] == "LEAN")
+    print(
+        f"\n🎯 Done — {len(rows)} priced props, "
+        f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
+        f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean}"
+    )
 
 
 if __name__ == "__main__":
