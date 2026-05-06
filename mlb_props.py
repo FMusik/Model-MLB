@@ -23,6 +23,7 @@ import math
 import datetime
 import unicodedata
 import difflib
+from collections import Counter
 
 import requests
 import pandas as pd
@@ -327,6 +328,8 @@ def build_rows(props, bpp, pitcher_hands):
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
+    bs_ph_counter   = Counter()
+    matchup_counter = Counter()
     for p in props:
         rec = match_player(p["player"], bpp)
         if not rec:
@@ -342,10 +345,14 @@ def build_rows(props, bpp, pitcher_hands):
         edge = model_p - imp
         edge_pct = edge * 100
 
-        bs = rec.get("stand", "")
-        ph = pitcher_hands.get(rec.get("opp", ""), "")
-        matchup_label = f"{bs or '?'} vs {ph or '?'}"
-        matchup       = matchup_score(bs, ph)
+        bs_raw = rec.get("stand", "")
+        ph_raw = pitcher_hands.get(rec.get("opp", ""), "")
+        bs = (bs_raw or "").strip().upper()[:1] or "?"
+        ph = (ph_raw or "").strip().upper()[:1] or "?"
+        bs_ph_counter[(bs, ph)] += 1
+        matchup_label = f"{bs} vs {ph}"
+        matchup       = matchup_score(bs_raw, ph_raw)
+        matchup_counter[int(matchup)] += 1
         composite     = composite_score(rec["p_hit"], edge_pct, matchup)
 
         out.append([
@@ -366,42 +373,47 @@ def build_rows(props, bpp, pitcher_hands):
             "✅" if edge >= EDGE_THRESHOLD else "",
             round(matchup, 2),
             round(composite, 2),
-            "",  # rating assigned below by percentile
+            "",  # rating assigned below by rank
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
 
-    # Assign ratings by percentile of today's composite-score distribution.
-    # ELITE = top 10%, STRONG = next 20%, LEAN = next 30%, rest dropped.
+    # Diagnostics: matchup component
+    if matchup_counter:
+        print(f"  📊 Matchup score counts: {dict(matchup_counter)}")
+        print(f"  📊 (BatterStand, PitcherHand) counts: {dict(bs_ph_counter)}")
+
+    # Assign ratings by RANK in today's composite-score distribution.
+    # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
+    # bottom 40% dropped. Rank-based avoids ties pulling everyone into one band.
     if out:
-        scores = sorted(r[16] for r in out)
-        median = scores[len(scores) // 2]
+        out.sort(key=lambda r: r[16], reverse=True)
+        n = len(out)
+        elite_end  = max(1, int(round(n * 0.10)))
+        strong_end = elite_end  + max(0, int(round(n * 0.15)))
+        lean_end   = strong_end + max(0, int(round(n * 0.35)))
+
+        scores = [r[16] for r in out]
         print(
-            f"  📊 Composite distribution — n={len(scores)} "
-            f"min={scores[0]:.2f} median={median:.2f} max={scores[-1]:.2f}"
+            f"  📊 Composite distribution — n={n} "
+            f"min={scores[-1]:.2f} median={scores[n // 2]:.2f} max={scores[0]:.2f}"
         )
-        cut_elite  = _percentile(scores, 90)
-        cut_strong = _percentile(scores, 70)
-        cut_lean   = _percentile(scores, 40)
         print(
-            f"  🎯 Rating cutoffs — ELITE >= {cut_elite:.2f}, "
-            f"STRONG >= {cut_strong:.2f}, LEAN >= {cut_lean:.2f}"
+            f"  🎯 Rank cutoffs — ELITE: top {elite_end} | "
+            f"STRONG: next {strong_end - elite_end} | "
+            f"LEAN: next {lean_end - strong_end} | "
+            f"dropping {n - lean_end}"
         )
+
         kept = []
-        for r in out:
-            s = r[16]
-            if s >= cut_elite:
-                r[17] = "ELITE"
-            elif s >= cut_strong:
-                r[17] = "STRONG"
-            elif s >= cut_lean:
-                r[17] = "LEAN"
-            else:
-                continue
+        for i, r in enumerate(out):
+            if   i < elite_end:  r[17] = "ELITE"
+            elif i < strong_end: r[17] = "STRONG"
+            elif i < lean_end:   r[17] = "LEAN"
+            else: break  # remainder dropped
             kept.append(r)
         out = kept
 
-    out.sort(key=lambda r: r[16], reverse=True)  # sort by Composite Score
     return out
 
 
