@@ -623,14 +623,13 @@ def build_rows(props, bpp, pitcher_hands):
             f"dropping {n - lean_end}"
         )
 
-        kept = []
+        # Tag each row with its rating; rows below the 40th percentile keep
+        # rating="" so the tracker can still log them when edge-flagged.
         for i, r in enumerate(out):
             if   i < elite_end:  r[22] = "ELITE"
             elif i < strong_end: r[22] = "STRONG"
             elif i < lean_end:   r[22] = "LEAN"
-            else: break  # remainder dropped
-            kept.append(r)
-        out = kept
+            # else: r[22] stays "" — caller filters per tab.
 
     return out
 
@@ -741,57 +740,35 @@ def write_today(sheet, rows):
 
 
 def append_tracker(sheet, rows):
-    """Append today's rows to Props Tracker, enforcing the current schema.
+    """Append flagged rows to the Props Tracker. NEVER clears the tab.
 
-    Schema check is strict: row 1 must equal HEADERS exactly. Any mismatch
-    (different headers, different order, different count) wipes the tab and
-    rewrites a fresh header — historical rows from older schemas are
-    incompatible and can't be safely mixed with current-schema rows.
-
-    Cleanup: when the header matches but legacy data rows have a different
-    column count, those rows are dropped and the surviving rows are
-    rewritten in place.
+    Tracker is the historical log — every edge-flagged row from every run
+    accumulates here. Schema may evolve over time; older rows keep their
+    original column layout, newer rows use the current HEADERS. The header
+    is written only when the tab is first created or is currently empty.
     """
     n_cols = len(HEADERS)
     print(f"  🔧 HEADERS ({n_cols} cols): {HEADERS}")
 
     try:
         ws = sheet.worksheet(TRACKER_TAB)
-        existing = ws.get_all_values()
-        print(f"  🔧 {TRACKER_TAB}: found existing tab, {len(existing)} rows")
-
-        if not existing or existing[0] != HEADERS:
-            print(f"  ⚠️  {TRACKER_TAB}: schema mismatch — wiping tab and rewriting header")
-            ws.clear()
+        first_row = ws.row_values(1)
+        if not first_row:
             ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+            print(f"  ➕ {TRACKER_TAB}: tab was empty — wrote header")
         else:
-            data_rows  = existing[1:]
-            valid_data = [r for r in data_rows if len(r) == n_cols]
-            dropped    = len(data_rows) - len(valid_data)
-            if dropped > 0:
-                print(f"  🧹 {TRACKER_TAB}: dropping {dropped} legacy rows with wrong column count")
-                ws.clear()
-                ws.append_row(HEADERS, value_input_option="USER_ENTERED")
-                if valid_data:
-                    ws.append_rows(valid_data, value_input_option="USER_ENTERED")
-            else:
-                print(f"  🔧 {TRACKER_TAB}: schema OK, {len(data_rows)} historical rows preserved")
+            print(f"  🔧 {TRACKER_TAB}: existing tab, append-only (history preserved)")
     except gspread.WorksheetNotFound:
-        print(f"  ➕ {TRACKER_TAB}: tab missing — creating with header")
+        print(f"  ➕ {TRACKER_TAB}: creating new tab with header")
         ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(30, n_cols))
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
 
     if not rows:
-        print(f"  ⚠️  {TRACKER_TAB}: no rows to append")
+        print(f"  ⚠️  {TRACKER_TAB}: no flagged rows to append")
         return
 
-    valid_rows = [r for r in rows if len(r) == n_cols]
-    bad        = len(rows) - len(valid_rows)
-    if bad > 0:
-        print(f"  ⚠️  {TRACKER_TAB}: dropping {bad} of today's rows with wrong column count")
-    if valid_rows:
-        ws.append_rows(valid_rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TRACKER_TAB}: appended {len(valid_rows)} rows")
+    ws.append_rows(rows, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} flagged rows")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
@@ -809,25 +786,31 @@ def main():
     else:
         print(f"  ⚠️  No confirmed lineups yet — using all {len(bpp)} BPP batters")
 
-    props         = get_batter_hits_props()
-    rows          = build_rows(props, bpp, pitcher_hands)
+    props = get_batter_hits_props()
+    rows  = build_rows(props, bpp, pitcher_hands)
 
-    bests = build_best_bets(rows)
+    # Per-tab views drawn from the same row pool:
+    #  - Today  = ELITE/STRONG/LEAN only (cleared and rewritten daily)
+    #  - Bests  = ELITE/STRONG only      (cleared and rewritten daily)
+    #  - Tracker = every edge-flagged row from the full pool (append-only)
+    rated   = [r for r in rows if r[22] in ("ELITE", "STRONG", "LEAN")]
+    flagged = [r for r in rows if r[20]]  # Edge Flag at index 20
+    bests   = build_best_bets(rated)
 
     sheet = get_sheet()
-    write_today(sheet, rows)
-    append_tracker(sheet, rows)
+    write_today(sheet, rated)
+    append_tracker(sheet, flagged)
     write_best_bets(sheet, bests)
 
-    edges  = sum(1 for r in rows if r[20])
-    elite  = sum(1 for r in rows if r[-1] == "ELITE")
-    strong = sum(1 for r in rows if r[-1] == "STRONG")
-    lean   = sum(1 for r in rows if r[-1] == "LEAN")
+    edges  = len(flagged)
+    elite  = sum(1 for r in rated if r[-1] == "ELITE")
+    strong = sum(1 for r in rated if r[-1] == "STRONG")
+    lean   = sum(1 for r in rated if r[-1] == "LEAN")
     print(
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
         f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
-        f"Best Bets: {len(bests)}"
+        f"Best Bets: {len(bests)} | Tracker append: {len(flagged)}"
     )
 
 
