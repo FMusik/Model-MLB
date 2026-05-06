@@ -375,6 +375,11 @@ def build_rows(props, bpp, pitcher_hands):
     # ELITE = top 10%, STRONG = next 20%, LEAN = next 30%, rest dropped.
     if out:
         scores = sorted(r[16] for r in out)
+        median = scores[len(scores) // 2]
+        print(
+            f"  📊 Composite distribution — n={len(scores)} "
+            f"min={scores[0]:.2f} median={median:.2f} max={scores[-1]:.2f}"
+        )
         cut_elite  = _percentile(scores, 90)
         cut_strong = _percentile(scores, 70)
         cut_lean   = _percentile(scores, 40)
@@ -411,22 +416,25 @@ def _get_or_create_ws(sheet, title, rows=1000, cols=20):
 def write_today(sheet, rows):
     ws = _get_or_create_ws(sheet, TODAY_TAB)
     ws.clear()
-    # Two explicit writes so row 1 is always the header, even if `rows` is
-    # empty or a combined write skipped the header slot.
-    ws.update(range_name="A1", values=[HEADERS], value_input_option="USER_ENTERED")
+    # append_row hits row 1 reliably after a clear(); avoids any update()
+    # range-resolution quirk that was eating the header.
+    ws.append_row(HEADERS, value_input_option="USER_ENTERED")
     if rows:
-        ws.update(range_name="A2", values=rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TODAY_TAB}: {len(rows)} rows + header")
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TODAY_TAB}: header + {len(rows)} rows")
 
 
 def append_tracker(sheet, rows):
-    if not rows:
-        return
     ws = _get_or_create_ws(sheet, TRACKER_TAB, rows=10000)
-    if not ws.get_all_values():
+    existing = ws.get_all_values()
+    if not existing:
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} rows")
+        print(f"  ➕ {TRACKER_TAB}: wrote header (was empty)")
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        print(f"  ✅ {TRACKER_TAB}: appended {len(rows)} rows")
+    else:
+        print(f"  ⚠️  {TRACKER_TAB}: no rows to append")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
