@@ -896,6 +896,21 @@ def append_tracker(sheet, tracker_rows):
                 value_input_option="USER_ENTERED",
             )
             print(f"  ➕ {TRACKER_TAB}: tab was empty — wrote header")
+        elif "Result" not in first_row:
+            # One-time schema reset: stale headers from earlier schemas don't
+            # include the manual-fill columns. Wipe and rewrite so the sheet
+            # matches TRACKER_HEADERS. After this fires once, future runs hit
+            # the no-op or prefix-extension branches.
+            print(
+                f"  🔄 {TRACKER_TAB}: 'Result' missing from row 1 — wiping and "
+                f"rewriting with current TRACKER_HEADERS (one-time reset)"
+            )
+            ws.clear()
+            ws.update(
+                range_name=f"A1:{end_col}1",
+                values=[TRACKER_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
         elif first_row == TRACKER_HEADERS:
             print(f"  🔧 {TRACKER_TAB}: header matches, append-only")
         elif (
