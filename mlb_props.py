@@ -92,11 +92,10 @@ TRACKER_HEADERS = [
 
 MANUAL_TRACKER_HEADERS = [
     "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
-    "Odds", "Book",
     "BPP Hit%", "Model Prob%", "Edge%",
     "Kelly Units", "MC Win%",
     "Composite Score", "Rating",
-    "Units Wagered", "Result", "Payout", "Notes",
+    "Result", "Notes",
 ]
 
 
@@ -838,6 +837,41 @@ def build_tracker_rows(rows):
     return out
 
 
+def build_manual_tracker_rows(rows):
+    """Same selection as Best Bets (ELITE/STRONG, one row per player, highest
+    Edge %), mapped to MANUAL_TRACKER_HEADERS shape with Result/Notes blank.
+    """
+    by_player = {}
+    for r in rows:
+        if r[21] not in ("ELITE", "STRONG"):
+            continue
+        key = r[2]
+        if key not in by_player or r[18] > by_player[key][18]:
+            by_player[key] = r
+
+    out = []
+    for r in by_player.values():
+        out.append([
+            r[0],   # Date
+            r[1],   # Game Time
+            r[2],   # Player
+            r[3],   # Team
+            r[4],   # Game
+            r[5],   # Line
+            r[6],   # Side
+            r[10],  # BPP Hit%
+            r[17],  # Model Prob%
+            r[18],  # Edge%
+            r[22],  # Kelly Units
+            r[23],  # MC Win%
+            r[20],  # Composite Score
+            r[21],  # Rating
+            "",     # Result
+            "",     # Notes
+        ])
+    return out
+
+
 # ── SHEET WRITES ───────────────────────────────────────────────
 def _get_or_create_ws(sheet, title, rows=1000, cols=30):
     try:
@@ -944,28 +978,25 @@ def append_tracker(sheet, tracker_rows):
     print(f"  ✅ {TRACKER_TAB}: appended {len(aligned)} ELITE/STRONG rows")
 
 
-def ensure_manual_tracker_tab(sheet):
-    """Make sure the manual-entry '📊 Tracker' tab exists with its header.
+def write_manual_tracker(sheet, manual_rows):
+    """Append Best-Bets-equivalent rows to '📊 Tracker', deduped against
+    existing rows by (Date, Player, Line). NEVER clears the tab. Result and
+    Notes columns stay blank for manual fill-in (W/L/P) after each game.
 
-    Header-only tab — never writes or appends data rows. The header is
-    written once (on creation or when the tab is found empty) and then left
-    alone so manual entries below it are preserved across runs.
+    Schema policy mirrors Props Tracker: missing columns are added to the
+    RIGHT of existing ones; new rows are aligned to the SHEET'S column
+    order so values land under the matching column name.
     """
     n_cols  = len(MANUAL_TRACKER_HEADERS)
     end_col = _col_letter(n_cols)
+    print(f"  🔧 MANUAL_TRACKER_HEADERS ({n_cols} cols): {MANUAL_TRACKER_HEADERS}")
+
     try:
         ws = sheet.worksheet(MANUAL_TRACKER_TAB)
-        first_row = ws.row_values(1)
-        if not first_row:
-            ws.update(
-                range_name=f"A1:{end_col}1",
-                values=[MANUAL_TRACKER_HEADERS],
-                value_input_option="USER_ENTERED",
-            )
-            print(f"  ➕ {MANUAL_TRACKER_TAB}: tab existed but empty — wrote header")
-        else:
-            print(f"  🔧 {MANUAL_TRACKER_TAB}: present, no action (manual-entry only)")
+        all_values = ws.get_all_values()
+        first_row  = all_values[0] if all_values else []
     except gspread.WorksheetNotFound:
+        print(f"  ➕ {MANUAL_TRACKER_TAB}: creating new tab with header")
         ws = sheet.add_worksheet(
             title=MANUAL_TRACKER_TAB,
             rows=10000,
@@ -976,7 +1007,76 @@ def ensure_manual_tracker_tab(sheet):
             values=[MANUAL_TRACKER_HEADERS],
             value_input_option="USER_ENTERED",
         )
-        print(f"  ➕ {MANUAL_TRACKER_TAB}: created with header (manual-entry only)")
+        first_row  = list(MANUAL_TRACKER_HEADERS)
+        all_values = [first_row]
+
+    if not first_row:
+        ws.update(
+            range_name=f"A1:{end_col}1",
+            values=[MANUAL_TRACKER_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+        first_row  = list(MANUAL_TRACKER_HEADERS)
+        all_values = [first_row]
+        print(f"  ➕ {MANUAL_TRACKER_TAB}: tab was empty — wrote header")
+    else:
+        existing_set = set(first_row)
+        missing = [c for c in MANUAL_TRACKER_HEADERS if c not in existing_set]
+        if missing:
+            start_col   = _col_letter(len(first_row) + 1)
+            new_end_col = _col_letter(len(first_row) + len(missing))
+            ws.update(
+                range_name=f"{start_col}1:{new_end_col}1",
+                values=[missing],
+                value_input_option="USER_ENTERED",
+            )
+            first_row = first_row + missing
+            print(f"  ➕ {MANUAL_TRACKER_TAB}: added {len(missing)} new column(s) → {missing}")
+
+    if not manual_rows:
+        print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 candidate rows from Best Bets")
+        return
+
+    # Build (Date, Player, Line) dedup key set from existing data rows.
+    try:
+        date_idx   = first_row.index("Date")
+        player_idx = first_row.index("Player")
+        line_idx   = first_row.index("Line")
+    except ValueError:
+        date_idx = player_idx = line_idx = None
+
+    existing_keys = set()
+    if date_idx is not None and player_idx is not None and line_idx is not None:
+        for row in all_values[1:]:
+            if max(date_idx, player_idx, line_idx) < len(row):
+                existing_keys.add((row[date_idx], row[player_idx], row[line_idx]))
+
+    # Filter to rows whose (Date, Player, Line) isn't already logged.
+    new_rows, skipped = [], 0
+    for row in manual_rows:
+        d   = dict(zip(MANUAL_TRACKER_HEADERS, row))
+        key = (str(d.get("Date", "")), str(d.get("Player", "")), str(d.get("Line", "")))
+        if key in existing_keys:
+            skipped += 1
+            continue
+        existing_keys.add(key)
+        new_rows.append(row)
+
+    if not new_rows:
+        print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 new rows ({skipped} candidate(s) already logged)")
+        return
+
+    # Align each row to the sheet's column order.
+    aligned = []
+    for row in new_rows:
+        d = dict(zip(MANUAL_TRACKER_HEADERS, row))
+        aligned.append([d.get(col, "") for col in first_row])
+
+    ws.append_rows(aligned, value_input_option="USER_ENTERED")
+    print(
+        f"  ✅ {MANUAL_TRACKER_TAB}: appended {len(aligned)} new row(s) "
+        f"({skipped} skipped as dupes)"
+    )
 
 
 # ── MAIN ───────────────────────────────────────────────────────
@@ -1007,12 +1107,13 @@ def main():
     rated         = [r for r in rows if r[21] in ("ELITE", "STRONG", "LEAN")]
     bests         = build_best_bets(rated)
     tracker_rows  = build_tracker_rows(rows)
+    manual_rows   = build_manual_tracker_rows(rows)
 
     sheet = get_sheet()
     write_today(sheet, rated)
     append_tracker(sheet, tracker_rows)
     write_best_bets(sheet, bests)
-    ensure_manual_tracker_tab(sheet)
+    write_manual_tracker(sheet, manual_rows)
 
     edges  = sum(1 for r in rows if r[19])
     elite  = sum(1 for r in rated if r[21] == "ELITE")
