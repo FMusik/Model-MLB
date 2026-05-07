@@ -60,23 +60,23 @@ WEIGHT_L20        = 0.25
 BLEND_BPP         = 0.70   # weight on BPP HitProbability in final blend
 BLEND_BA          = 0.30   # weight on BA-derived hit prob in final blend
 
-TODAY_TAB         = "Props Today"
-TRACKER_TAB       = "Props Tracker"
-BEST_TAB          = "🎯 Best Bets"
+TODAY_TAB           = "Props Today"
+TRACKER_TAB         = "Props Tracker"
+BEST_TAB            = "🎯 Best Bets"
+MANUAL_TRACKER_TAB  = "📊 Tracker"
 
 HEADERS = [
     "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
     "Bookmaker", "Odds", "Implied %",
     "BPP HitProb %", "BPP AtBats",
     "Career BA", "Season BA", "L20 BA", "Weighted BA", "Model Prob",
-    "Matchup",
     "Model Prob %", "Edge %", "Edge Flag",
     "Composite Score", "Rating",
     "Kelly Units", "MC Win%",
 ]
 
 BEST_HEADERS = [
-    "Game Time", "Player", "Team", "Matchup", "Line", "Side",
+    "Game Time", "Player", "Team", "Line", "Side",
     "Best Odds", "Best Book", "BPP Hit%", "Model Prob%", "Edge%",
     "Rating", "Composite Score",
     "Kelly Units", "MC Win%",
@@ -84,11 +84,19 @@ BEST_HEADERS = [
 
 TRACKER_HEADERS = [
     "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
-    "Best Odds", "Best Book",
     "BPP Hit%", "Model Prob%", "Edge%",
     "Composite Score", "Rating",
     "Kelly Units", "MC Win%",
     "Result", "Notes",
+]
+
+MANUAL_TRACKER_HEADERS = [
+    "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
+    "Odds", "Book",
+    "BPP Hit%", "Model Prob%", "Edge%",
+    "Kelly Units", "MC Win%",
+    "Composite Score", "Rating",
+    "Units Wagered", "Result", "Payout", "Notes",
 ]
 
 
@@ -620,7 +628,6 @@ def build_rows(props, bpp, pitcher_hands):
         bs = (bs_raw or "").strip().upper()[:1] or "?"
         ph = (ph_raw or "").strip().upper()[:1] or "?"
         bs_ph_counter[(bs, ph)] += 1
-        matchup_label = f"{bs} vs {ph}"
 
         # Bet sizing + MC simulation
         kelly = kelly_units(model_p, p["price"])
@@ -647,7 +654,6 @@ def build_rows(props, bpp, pitcher_hands):
             round(l20_ba,    3) if l20_ba    is not None else "",
             round(wba,       3) if wba       is not None else "",
             round(blended * 100, 2),
-            matchup_label,
             round(model_p * 100, 2),
             round(edge_pct, 2),
             "✅" if edge >= EDGE_THRESHOLD else "",
@@ -676,27 +682,27 @@ def build_rows(props, bpp, pitcher_hands):
     # Both BPP HitProbability (0.24–0.76 band) and Edge % cluster too tightly
     # for raw-scaled scores to produce real spread; ranking against the day's
     # distribution forces the full 0–100 range.
-    #   r[10] = BPP HitProb %   r[19] = Edge %   r[21] = Composite Score (target)
+    #   r[10] = BPP HitProb %   r[18] = Edge %   r[20] = Composite Score (target)
     if out:
         sorted_hit  = sorted(r[10] for r in out)
-        sorted_edge = sorted(r[19] for r in out)
+        sorted_edge = sorted(r[18] for r in out)
         n           = len(out)
         for r in out:
             hit_pr  = 100.0 * bisect_right(sorted_hit,  r[10]) / n
-            edge_pr = 100.0 * bisect_right(sorted_edge, r[19]) / n
-            r[21]   = round(composite_score(hit_pr, edge_pr), 2)
+            edge_pr = 100.0 * bisect_right(sorted_edge, r[18]) / n
+            r[20]   = round(composite_score(hit_pr, edge_pr), 2)
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
-    # bottom 40% dropped. Composite is at column index 21, rating at 22.
+    # bottom 40% dropped. Composite is at column index 20, rating at 21.
     if out:
-        out.sort(key=lambda r: r[21], reverse=True)
+        out.sort(key=lambda r: r[20], reverse=True)
         n = len(out)
         elite_end  = max(1, int(round(n * 0.10)))
         strong_end = elite_end  + max(0, int(round(n * 0.15)))
         lean_end   = strong_end + max(0, int(round(n * 0.35)))
 
-        scores = [r[21] for r in out]
+        scores = [r[20] for r in out]
         print(
             f"  📊 Composite distribution — n={n} "
             f"min={scores[-1]:.2f} median={scores[n // 2]:.2f} max={scores[0]:.2f}"
@@ -708,13 +714,11 @@ def build_rows(props, bpp, pitcher_hands):
             f"dropping {n - lean_end}"
         )
 
-        # Tag each row with its rating; rows below the 40th percentile keep
-        # rating="" so the tracker can still log them when edge-flagged.
         for i, r in enumerate(out):
-            if   i < elite_end:  r[22] = "ELITE"
-            elif i < strong_end: r[22] = "STRONG"
-            elif i < lean_end:   r[22] = "LEAN"
-            # else: r[22] stays "" — caller filters per tab.
+            if   i < elite_end:  r[21] = "ELITE"
+            elif i < strong_end: r[21] = "STRONG"
+            elif i < lean_end:   r[21] = "LEAN"
+            # else: r[21] stays "" — caller filters per tab.
 
     return out
 
@@ -729,15 +733,16 @@ def build_best_bets(rows):
 
     Column indices used (against current HEADERS):
       1=Game Time, 2=Player, 3=Team, 5=Line, 6=Side,
-      7=Bookmaker, 8=Odds, 10=BPP HitProb %, 17=Matchup,
-      18=Model Prob %, 19=Edge %, 21=Composite, 22=Rating
+      7=Bookmaker, 8=Odds, 10=BPP HitProb %,
+      17=Model Prob %, 18=Edge %, 20=Composite, 21=Rating,
+      22=Kelly Units, 23=MC Win%
     """
     by_player = {}
     for r in rows:
-        if r[22] not in ("ELITE", "STRONG"):
+        if r[21] not in ("ELITE", "STRONG"):
             continue
         key = r[2]
-        if key not in by_player or r[19] > by_player[key][19]:
+        if key not in by_player or r[18] > by_player[key][18]:
             by_player[key] = r
 
     bests = []
@@ -746,23 +751,22 @@ def build_best_bets(rows):
             r[1],   # Game Time
             r[2],   # Player
             r[3],   # Team
-            r[17],  # Matchup
             r[5],   # Line
             r[6],   # Side
             r[8],   # Best Odds
             r[7],   # Best Book
             r[10],  # BPP Hit%
-            r[18],  # Model Prob%
-            r[19],  # Edge%
-            r[22],  # Rating
-            r[21],  # Composite Score
-            r[23],  # Kelly Units
-            r[24],  # MC Win%
+            r[17],  # Model Prob%
+            r[18],  # Edge%
+            r[21],  # Rating
+            r[20],  # Composite Score
+            r[22],  # Kelly Units
+            r[23],  # MC Win%
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological. Composite is at
-    # column 12 of the Best Bets row.
-    bests.sort(key=lambda b: (b[0], -b[12]))
+    # column 11 of the Best Bets row (BEST_HEADERS index).
+    bests.sort(key=lambda b: (b[0], -b[11]))
     return bests
 
 
@@ -792,7 +796,9 @@ def write_best_bets(sheet, best_rows):
 def build_tracker_rows(rows):
     """ELITE/STRONG rows mapped to TRACKER_HEADERS shape.
 
-    Result and Notes columns are blank — filled in manually after the game.
+    Deduplicated to one row per (date, player, line) — across all bookmakers
+    and sides we keep the row with the highest Edge %. Result and Notes
+    columns are blank for manual fill-in after the game.
 
     Source HEADERS index → tracker column:
       0  Date          → Date
@@ -802,29 +808,32 @@ def build_tracker_rows(rows):
       4  Game          → Game
       5  Line          → Line
       6  Side          → Side
-      8  Odds          → Best Odds
-      7  Bookmaker     → Best Book
       10 BPP HitProb % → BPP Hit%
-      18 Model Prob %  → Model Prob%
-      19 Edge %        → Edge%
-      21 Composite     → Composite Score
-      22 Rating        → Rating
-      23 Kelly Units   → Kelly Units
-      24 MC Win%       → MC Win%
-      ""               → Result   (last col, manual fill-in)
-      ""               → Notes    (last col, manual fill-in)
+      17 Model Prob %  → Model Prob%
+      18 Edge %        → Edge%
+      20 Composite     → Composite Score
+      21 Rating        → Rating
+      22 Kelly Units   → Kelly Units
+      23 MC Win%       → MC Win%
+      ""               → Result   (manual fill-in)
+      ""               → Notes    (manual fill-in)
     """
-    out = []
+    by_key = {}
     for r in rows:
-        if r[22] not in ("ELITE", "STRONG"):
+        if r[21] not in ("ELITE", "STRONG"):
             continue
+        key = (r[0], r[2], r[5])  # (date, player, line)
+        if key not in by_key or r[18] > by_key[key][18]:
+            by_key[key] = r
+
+    out = []
+    for r in by_key.values():
         out.append([
             r[0], r[1], r[2], r[3], r[4], r[5], r[6],
-            r[8], r[7],
-            r[10], r[18], r[19],
-            r[21], r[22],
-            r[23], r[24],   # Kelly Units, MC Win%
-            "", "",          # Result, Notes (manual fill-in, last two cols)
+            r[10], r[17], r[18],
+            r[20], r[21],
+            r[22], r[23],
+            "", "",
         ])
     return out
 
@@ -869,68 +878,22 @@ def write_today(sheet, rows):
 
 
 def append_tracker(sheet, tracker_rows):
-    """Append ELITE/STRONG rows to the Props Tracker. NEVER clears the tab.
+    """Append ELITE/STRONG rows to Props Tracker. NEVER WIPES — under any
+    circumstances. Existing rows and column positions are preserved.
 
-    The tracker is the historical log — every play we'd care to track
-    (ELITE/STRONG only) accumulates here. The "Result" and "Notes" columns
-    are left blank for manual fill-in after the game.
-
-    Schema migration policy: never wipe historical data. If the existing
-    header is a strict prefix of TRACKER_HEADERS, the new column names get
-    appended to the right of row 1 and existing rows keep their layout.
-    Other mismatches log a warning and append new rows in the current
-    schema — old rows are preserved as-is, possibly misaligned.
+    Schema policy: any TRACKER_HEADERS columns that aren't already present
+    in the sheet's row 1 are appended to the RIGHT of existing columns.
+    Data rows are then aligned to the SHEET'S actual column order — values
+    are placed under matching column names regardless of where the column
+    sits in the sheet.
     """
-    n_cols = len(TRACKER_HEADERS)
+    n_cols  = len(TRACKER_HEADERS)
     end_col = _col_letter(n_cols)
     print(f"  🔧 TRACKER_HEADERS ({n_cols} cols): {TRACKER_HEADERS}")
 
     try:
         ws = sheet.worksheet(TRACKER_TAB)
         first_row = ws.row_values(1)
-
-        if not first_row:
-            ws.update(
-                range_name=f"A1:{end_col}1",
-                values=[TRACKER_HEADERS],
-                value_input_option="USER_ENTERED",
-            )
-            print(f"  ➕ {TRACKER_TAB}: tab was empty — wrote header")
-        elif "Result" not in first_row:
-            # One-time schema reset: stale headers from earlier schemas don't
-            # include the manual-fill columns. Wipe and rewrite so the sheet
-            # matches TRACKER_HEADERS. After this fires once, future runs hit
-            # the no-op or prefix-extension branches.
-            print(
-                f"  🔄 {TRACKER_TAB}: 'Result' missing from row 1 — wiping and "
-                f"rewriting with current TRACKER_HEADERS (one-time reset)"
-            )
-            ws.clear()
-            ws.update(
-                range_name=f"A1:{end_col}1",
-                values=[TRACKER_HEADERS],
-                value_input_option="USER_ENTERED",
-            )
-        elif first_row == TRACKER_HEADERS:
-            print(f"  🔧 {TRACKER_TAB}: header matches, append-only")
-        elif (
-            len(first_row) < n_cols
-            and TRACKER_HEADERS[: len(first_row)] == first_row
-        ):
-            new_cols  = TRACKER_HEADERS[len(first_row):]
-            start_col = _col_letter(len(first_row) + 1)
-            ws.update(
-                range_name=f"{start_col}1:{end_col}1",
-                values=[new_cols],
-                value_input_option="USER_ENTERED",
-            )
-            print(f"  ➕ {TRACKER_TAB}: extended header with {len(new_cols)} new column(s) → {new_cols}")
-        else:
-            print(
-                f"  ⚠️  {TRACKER_TAB}: existing header doesn't match TRACKER_HEADERS and isn't a "
-                f"prefix. History preserved as-is; new rows append in current schema and may be "
-                f"misaligned against the old header. Existing first row: {first_row}"
-            )
     except gspread.WorksheetNotFound:
         print(f"  ➕ {TRACKER_TAB}: creating new tab with header")
         ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(30, n_cols))
@@ -939,13 +902,81 @@ def append_tracker(sheet, tracker_rows):
             values=[TRACKER_HEADERS],
             value_input_option="USER_ENTERED",
         )
+        first_row = list(TRACKER_HEADERS)
+
+    if not first_row:
+        ws.update(
+            range_name=f"A1:{end_col}1",
+            values=[TRACKER_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+        first_row = list(TRACKER_HEADERS)
+        print(f"  ➕ {TRACKER_TAB}: tab was empty — wrote header")
+    else:
+        existing_set = set(first_row)
+        missing      = [c for c in TRACKER_HEADERS if c not in existing_set]
+        if missing:
+            start_col   = _col_letter(len(first_row) + 1)
+            new_end_col = _col_letter(len(first_row) + len(missing))
+            ws.update(
+                range_name=f"{start_col}1:{new_end_col}1",
+                values=[missing],
+                value_input_option="USER_ENTERED",
+            )
+            first_row = first_row + missing
+            print(f"  ➕ {TRACKER_TAB}: added {len(missing)} new column(s) to right → {missing}")
+        else:
+            print(f"  🔧 {TRACKER_TAB}: all TRACKER_HEADERS columns present in row 1")
 
     if not tracker_rows:
         print(f"  ⚠️  {TRACKER_TAB}: no ELITE/STRONG rows to append")
         return
 
-    ws.append_rows(tracker_rows, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TRACKER_TAB}: appended {len(tracker_rows)} ELITE/STRONG rows")
+    # Align each row's values (positionally indexed against TRACKER_HEADERS)
+    # to whatever column order the sheet currently has. Unknown sheet columns
+    # get blank values so we never overwrite cells we don't own.
+    aligned = []
+    for row in tracker_rows:
+        d = dict(zip(TRACKER_HEADERS, row))
+        aligned.append([d.get(col, "") for col in first_row])
+
+    ws.append_rows(aligned, value_input_option="USER_ENTERED")
+    print(f"  ✅ {TRACKER_TAB}: appended {len(aligned)} ELITE/STRONG rows")
+
+
+def ensure_manual_tracker_tab(sheet):
+    """Make sure the manual-entry '📊 Tracker' tab exists with its header.
+
+    Header-only tab — never writes or appends data rows. The header is
+    written once (on creation or when the tab is found empty) and then left
+    alone so manual entries below it are preserved across runs.
+    """
+    n_cols  = len(MANUAL_TRACKER_HEADERS)
+    end_col = _col_letter(n_cols)
+    try:
+        ws = sheet.worksheet(MANUAL_TRACKER_TAB)
+        first_row = ws.row_values(1)
+        if not first_row:
+            ws.update(
+                range_name=f"A1:{end_col}1",
+                values=[MANUAL_TRACKER_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+            print(f"  ➕ {MANUAL_TRACKER_TAB}: tab existed but empty — wrote header")
+        else:
+            print(f"  🔧 {MANUAL_TRACKER_TAB}: present, no action (manual-entry only)")
+    except gspread.WorksheetNotFound:
+        ws = sheet.add_worksheet(
+            title=MANUAL_TRACKER_TAB,
+            rows=10000,
+            cols=max(30, n_cols),
+        )
+        ws.update(
+            range_name=f"A1:{end_col}1",
+            values=[MANUAL_TRACKER_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+        print(f"  ➕ {MANUAL_TRACKER_TAB}: created with header (manual-entry only)")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
@@ -966,11 +997,14 @@ def main():
     props = get_batter_hits_props()
     rows  = build_rows(props, bpp, pitcher_hands)
 
-    # Per-tab views drawn from the same row pool:
+    # Per-tab views drawn from the same row pool. Rating is now at index 21,
+    # Edge Flag at 19, after dropping the Matchup column from HEADERS.
     #  - Today   = ELITE/STRONG/LEAN (cleared and rewritten daily, full HEADERS)
     #  - Bests   = ELITE/STRONG      (cleared and rewritten daily, BEST_HEADERS)
-    #  - Tracker = ELITE/STRONG      (append-only history, TRACKER_HEADERS)
-    rated         = [r for r in rows if r[22] in ("ELITE", "STRONG", "LEAN")]
+    #  - Tracker = ELITE/STRONG      (append-only history, TRACKER_HEADERS,
+    #                                 deduped to one row per player+line)
+    #  - 📊 Tracker = manual-entry tab with header only (created if missing)
+    rated         = [r for r in rows if r[21] in ("ELITE", "STRONG", "LEAN")]
     bests         = build_best_bets(rated)
     tracker_rows  = build_tracker_rows(rows)
 
@@ -978,16 +1012,17 @@ def main():
     write_today(sheet, rated)
     append_tracker(sheet, tracker_rows)
     write_best_bets(sheet, bests)
+    ensure_manual_tracker_tab(sheet)
 
-    edges  = sum(1 for r in rows if r[20])
-    elite  = sum(1 for r in rated if r[22] == "ELITE")
-    strong = sum(1 for r in rated if r[22] == "STRONG")
-    lean   = sum(1 for r in rated if r[22] == "LEAN")
+    edges  = sum(1 for r in rows if r[19])
+    elite  = sum(1 for r in rated if r[21] == "ELITE")
+    strong = sum(1 for r in rated if r[21] == "STRONG")
+    lean   = sum(1 for r in rated if r[21] == "LEAN")
     print(
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
         f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
-        f"Best Bets: {len(bests)} | Tracker append: {len(tracker_rows)}"
+        f"Best Bets: {len(bests)} | Props Tracker append: {len(tracker_rows)}"
     )
 
 
