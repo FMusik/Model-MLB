@@ -35,6 +35,12 @@ jobs:
           ODDS_API_KEY:   ${{ secrets.ODDS_API_KEY }}
           PROPS_SHEET_ID: ${{ secrets.PROPS_SHEET_ID }}
 
+      - name: Auto-score Props Tracker
+        if: always()
+        run: python sheets/props_scorer.py
+        env:
+          PROPS_SHEET_ID: ${{ secrets.PROPS_SHEET_ID }}
+
       - name: Cleanup credentials
         if: always()
         run: rm -f credentials.json
