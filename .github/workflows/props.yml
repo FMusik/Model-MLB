@@ -5,6 +5,11 @@ on:
     - cron: '30 15 * * *'   # 11:30 AM ET (EDT) / 10:30 AM ET (EST)
     - cron: '0 22 * * *'    # 6:00 PM ET (EDT)  /  5:00 PM ET (EST)
   workflow_dispatch:
+    inputs:
+      backfill_days:
+        description: 'Backfill last N days of Props Tracker results (0 = run normally)'
+        required: false
+        default: '0'
 
 jobs:
   run-props:
@@ -24,12 +29,14 @@ jobs:
         run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
       - name: Fetch BallparkPal data
+        if: ${{ (github.event.inputs.backfill_days || '0') == '0' }}
         run: python fetch_ballparkpal.py
         env:
           BP_EMAIL:    ${{ secrets.BP_EMAIL }}
           BP_PASSWORD: ${{ secrets.BP_PASSWORD }}
 
       - name: Run MLB props model
+        if: ${{ (github.event.inputs.backfill_days || '0') == '0' }}
         run: python mlb_props.py
         env:
           ODDS_API_KEY:   ${{ secrets.ODDS_API_KEY }}
@@ -37,7 +44,14 @@ jobs:
 
       - name: Auto-score Props Tracker
         if: always()
-        run: python sheets/props_scorer.py
+        run: |
+          BACKFILL="${{ github.event.inputs.backfill_days || '0' }}"
+          if [ "$BACKFILL" -gt 0 ]; then
+            echo "Running scorer in backfill mode for $BACKFILL day(s)"
+            python sheets/props_scorer.py --backfill "$BACKFILL"
+          else
+            python sheets/props_scorer.py
+          fi
         env:
           PROPS_SHEET_ID: ${{ secrets.PROPS_SHEET_ID }}
 

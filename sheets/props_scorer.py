@@ -15,6 +15,7 @@ ENV:
                       (falls back to ../credentials.json or ./credentials.json)
 """
 
+import argparse
 import os
 import sys
 import json
@@ -161,12 +162,17 @@ def search_player_id(name: str, session: requests.Session) -> str:
 
 
 # ── HIT LOOKUP ─────────────────────────────────────────────────
-def fetch_player_hits_for_date(player_id: str, target_date: str,
-                                session: requests.Session):
-    """Return total hits for `target_date` (YYYY-MM-DD), or None if no game logged yet."""
+def fetch_player_gamelog(player_id: str, season: int,
+                          session: requests.Session, cache: dict) -> dict:
+    """Return {date: hits_total} for the player's season gameLog. Cached by
+    (player_id, season) so multi-date backfills make at most one API call
+    per player per season."""
+    key = (player_id, season)
+    if key in cache:
+        return cache[key]
     if not player_id:
-        return None
-    season = int(target_date[:4])
+        cache[key] = {}
+        return {}
     try:
         r = session.get(
             f"{MLB_STATS_BASE}/people/{player_id}/stats",
@@ -174,28 +180,28 @@ def fetch_player_hits_for_date(player_id: str, target_date: str,
             timeout=8,
         )
         if r.status_code != 200:
-            return None
+            cache[key] = {}
+            return {}
         data = r.json()
     except Exception:
-        return None
+        cache[key] = {}
+        return {}
 
+    by_date: dict = {}
     for block in data.get("stats", []):
         if "gamelog" not in (block.get("type", {}).get("displayName") or "").lower():
             continue
-        total = 0
-        found = False
         for s in block.get("splits", []):
-            game_date = s.get("date") or (s.get("gameDate", "") or "")[:10]
-            if game_date != target_date:
+            d = s.get("date") or (s.get("gameDate", "") or "")[:10]
+            if not d:
                 continue
             try:
-                total += int(s.get("stat", {}).get("hits", 0))
-                found  = True
+                hits = int(s.get("stat", {}).get("hits", 0))
             except (TypeError, ValueError):
-                pass
-        if found:
-            return total
-    return None
+                continue
+            by_date[d] = by_date.get(d, 0) + hits  # doubleheader: sum games
+    cache[key] = by_date
+    return by_date
 
 
 # ── SCORING ────────────────────────────────────────────────────
@@ -213,11 +219,61 @@ def score_result(line: float, side: str, hits: int) -> str:
     return ""
 
 
+# ── CLI / TARGET DATES ─────────────────────────────────────────
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Auto-score 📊 Tracker rows by reading hits from the MLB Stats API.",
+    )
+    parser.add_argument(
+        "date",
+        nargs="?",
+        default=None,
+        help="Specific date YYYY-MM-DD to score (default: today in ET)",
+    )
+    parser.add_argument(
+        "--backfill",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Score the last N days instead of a single date (overrides positional date)",
+    )
+    return parser.parse_args(argv)
+
+
+def resolve_target_dates(args) -> list:
+    """Returns the list of YYYY-MM-DD dates to score, derived from args."""
+    if args.backfill > 0:
+        if ET_ZONE:
+            today = datetime.datetime.now(ET_ZONE).date()
+        else:
+            today = datetime.date.today()
+        return [
+            (today - datetime.timedelta(days=i)).isoformat()
+            for i in range(args.backfill)
+        ]
+    if args.date:
+        try:
+            datetime.date.fromisoformat(args.date)
+        except ValueError:
+            sys.exit(f"❌ Invalid date format: {args.date} (expected YYYY-MM-DD)")
+        return [args.date]
+    return [today_et()]
+
+
 # ── MAIN ───────────────────────────────────────────────────────
-def main():
+def main(argv=None):
+    args         = parse_args(argv)
+    target_dates = resolve_target_dates(args)
+    target_set   = set(target_dates)
+
     print("🔍 Auto-scoring 📊 Tracker tab...")
-    today = today_et()
-    print(f"  Today (ET): {today}")
+    if args.backfill > 0:
+        sd = sorted(target_set)
+        print(f"  📅 Backfill mode — last {args.backfill} day(s): {sd[0]} → {sd[-1]}")
+    elif args.date:
+        print(f"  📅 Target date: {args.date}")
+    else:
+        print(f"  📅 Today (ET): {target_dates[0]}")
 
     sheet = get_sheet()
     try:
@@ -241,13 +297,13 @@ def main():
     except ValueError as e:
         sys.exit(f"❌ Missing required column in {MANUAL_TRACKER_TAB}: {e}")
 
-    # Collect candidate rows: today + blank Result
-    candidates = []  # (sheet_row, player, line, side)
-    for i, row in enumerate(all_values[1:], start=2):  # rows are 1-indexed; header is row 1
+    # Candidate rows: any target date + blank Result.
+    candidates = []  # (sheet_row, target_date, player, line, side)
+    for i, row in enumerate(all_values[1:], start=2):
         max_idx = max(date_idx, player_idx, line_idx, side_idx, result_idx)
         if max_idx >= len(row):
             continue
-        if row[date_idx] != today:
+        if row[date_idx] not in target_set:
             continue
         if str(row[result_idx]).strip():
             continue
@@ -255,23 +311,24 @@ def main():
             line = float(row[line_idx])
         except (TypeError, ValueError):
             continue
-        candidates.append((i, row[player_idx], line, row[side_idx]))
+        candidates.append((i, row[date_idx], row[player_idx], line, row[side_idx]))
 
     if not candidates:
-        print(f"  ✅ No rows to score (Date = {today}, Result blank)")
+        print(f"  ✅ No rows to score (target dates: {len(target_set)}, all rows already scored or empty)")
         return
 
     print(f"  📋 {len(candidates)} candidate row(s) to score")
 
-    bpp_id_map = load_bpp_id_map()
-    session    = requests.Session()
-    id_cache   = {}  # normalized name → mlbam id (avoids duplicate lookups)
+    bpp_id_map     = load_bpp_id_map()
+    session        = requests.Session()
+    id_cache       = {}  # normalized name → mlbam id
+    gamelog_cache  = {}  # (mlbam_id, season) → {date: hits}
 
     updates = []
     scored, no_data, no_id = 0, 0, 0
     result_col = _col_letter(result_idx + 1)
 
-    for sheet_row, player, line, side in candidates:
+    for sheet_row, target_date, player, line, side in candidates:
         key = normalize_name(player)
         if key not in id_cache:
             pid = bpp_id_map.get(key, "") or search_player_id(player, session)
@@ -282,7 +339,9 @@ def main():
             print(f"  ⚠️  No MLBAM ID for {player!r} — skipped")
             continue
 
-        hits = fetch_player_hits_for_date(pid, today, session)
+        season  = int(target_date[:4])
+        gamelog = fetch_player_gamelog(pid, season, session, gamelog_cache)
+        hits    = gamelog.get(target_date)
         if hits is None:
             no_data += 1
             continue
@@ -296,18 +355,18 @@ def main():
             "values": [[result]],
         })
         scored += 1
-        print(f"  ✅ {player}: {side} {line} | hits={hits} → {result}")
+        print(f"  ✅ {target_date} {player}: {side} {line} | hits={hits} → {result}")
 
     if updates:
         ws.batch_update(updates, value_input_option="USER_ENTERED")
         print(
             f"\n🎯 Auto-scored {scored} row(s) | "
-            f"{no_data} player(s) with no game data yet | {no_id} unmapped"
+            f"{no_data} player(s) with no game data | {no_id} unmapped"
         )
     else:
         print(
             f"\n🎯 0 scored — game data not yet available "
-            f"({no_data} not-played, {no_id} unmapped)"
+            f"({no_data} not played, {no_id} unmapped)"
         )
 
 
