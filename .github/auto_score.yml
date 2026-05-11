@@ -1,0 +1,35 @@
+name: Auto Score Tracker
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date to score (YYYY-MM-DD), or leave blank to fill ALL unfilled rows"
+        required: false
+        default: ""
+
+jobs:
+  auto-score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install gspread google-auth requests
+
+      - name: Write credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run auto scorer
+        run: python auto_scorer.py ${{ github.event.inputs.date }}
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
