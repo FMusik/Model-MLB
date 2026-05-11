@@ -367,8 +367,11 @@ def auto_score(sheet, date_str: str = None) -> int:
             continue
         if target_date and row_date != target_date:
             continue
-        # Check if unfilled
-        existing_hm = row[COL_HIT_MISS].strip() if COL_HIT_MISS < len(row) else ""
+        # Check if unfilled — short rows (< COL_HIT_MISS cols) are always unfilled
+        if len(row) <= COL_HIT_MISS:
+            existing_hm = ""
+        else:
+            existing_hm = row[COL_HIT_MISS].strip()
         if not existing_hm or existing_hm in ("", "PENDING", "—", "-"):
             # Only fetch past dates (today or earlier)
             if row_date <= today:
@@ -413,8 +416,11 @@ def auto_score(sheet, date_str: str = None) -> int:
         if not game_str:
             continue
 
-        # Skip if already scored
-        existing_hm = row[COL_HIT_MISS].strip() if COL_HIT_MISS < len(row) else ""
+        # Skip if already scored — short rows are always unfilled
+        if len(row) <= COL_HIT_MISS:
+            existing_hm = ""
+        else:
+            existing_hm = row[COL_HIT_MISS].strip()
         if existing_hm and existing_hm not in ("", "PENDING", "—", "-"):
             skipped += 1
             continue
