@@ -357,6 +357,15 @@ def auto_score(sheet, date_str: str = None) -> int:
         print("  ⚠️  Tracker is empty")
         return 0
 
+    # DEBUG: show what we're working with
+    print(f"  🔍 DEBUG: total rows in tracker = {len(all_vals)}")
+    print(f"  🔍 DEBUG: header row = {all_vals[0][:5]}")
+    # Check last 5 data rows
+    for dbg_row in all_vals[-6:-1]:
+        if dbg_row and dbg_row[0]:
+            hm_val = dbg_row[COL_HIT_MISS] if len(dbg_row) > COL_HIT_MISS else "MISSING_COL"
+            print(f"  🔍 DEBUG row: date={dbg_row[0]} | game={dbg_row[1][:30] if len(dbg_row)>1 else '?'} | len={len(dbg_row)} | hit_miss='{hm_val}'")
+
     # Collect all unique dates that have unfilled rows
     dates_needed = set()
     for row in all_vals[1:]:
