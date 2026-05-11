@@ -332,16 +332,19 @@ def col_letter(idx: int) -> str:
 def auto_score(sheet, date_str: str = None) -> int:
     """
     Fills in Actual Away, Actual Home, Actual Total, Hit/Miss
-    for all Tracker rows from date_str that have final scores.
+    for ALL unfilled Tracker rows — any date, not just today.
+
+    If date_str is given, only scores that date.
+    Otherwise scores every unfilled row across all dates.
     Returns count of rows updated.
     """
-    date_str = date_str or datetime.date.today().strftime("%Y-%m-%d")
-    print(f"\n🏁 Auto-scoring Tracker for {date_str}...")
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    target_date = date_str  # None = score all unfilled
 
-    scores = fetch_final_scores(date_str)
-    if not scores:
-        print("  ⚠️  No final scores available yet")
-        return 0
+    if target_date:
+        print(f"\n🏁 Auto-scoring Tracker for {target_date}...")
+    else:
+        print(f"\n🏁 Auto-scoring all unfilled Tracker rows...")
 
     try:
         ws       = sheet.worksheet(TRACKER_TAB)
@@ -354,17 +357,56 @@ def auto_score(sheet, date_str: str = None) -> int:
         print("  ⚠️  Tracker is empty")
         return 0
 
+    # Collect all unique dates that have unfilled rows
+    dates_needed = set()
+    for row in all_vals[1:]:
+        if not row or len(row) <= COL_DATE:
+            continue
+        row_date = row[COL_DATE].strip() if COL_DATE < len(row) else ""
+        if not row_date:
+            continue
+        if target_date and row_date != target_date:
+            continue
+        # Check if unfilled
+        existing_hm = row[COL_HIT_MISS].strip() if COL_HIT_MISS < len(row) else ""
+        if not existing_hm or existing_hm in ("", "PENDING", "—", "-"):
+            # Only fetch past dates (today or earlier)
+            if row_date <= today:
+                dates_needed.add(row_date)
+
+    if not dates_needed:
+        print("  ✅ Nothing to fill — all rows already scored")
+        return 0
+
+    print(f"  📅 Dates with unfilled rows: {', '.join(sorted(dates_needed))}")
+
+    # Fetch scores for each needed date
+    scores_by_date = {}
+    for d in sorted(dates_needed):
+        scores = fetch_final_scores(d)
+        if scores:
+            scores_by_date[d] = scores
+            print(f"  ✅ {d}: {len(scores)} final scores")
+        else:
+            print(f"  ⏳ {d}: no final scores yet")
+
+    if not scores_by_date:
+        print("  ⚠️  No final scores available for any date")
+        return 0
+
     updates = []
     updated = 0
     skipped = 0
+    tab = TRACKER_TAB
 
-    for i, row in enumerate(all_vals[1:], start=2):  # row 1 is header
+    for i, row in enumerate(all_vals[1:], start=2):
         if not row or len(row) <= COL_DATE:
             continue
 
-        # Only process today's date
         row_date = row[COL_DATE].strip() if COL_DATE < len(row) else ""
-        if row_date != date_str:
+        if not row_date:
+            continue
+        if target_date and row_date != target_date:
             continue
 
         game_str = row[COL_GAME].strip() if COL_GAME < len(row) else ""
@@ -377,10 +419,14 @@ def auto_score(sheet, date_str: str = None) -> int:
             skipped += 1
             continue
 
-        # Match to final scores
+        # Get scores for this row's date
+        scores = scores_by_date.get(row_date, {})
+        if not scores:
+            continue
+
         matched_key = fuzzy_match(game_str, scores)
         if not matched_key:
-            print(f"  ⏳ No final score yet: {game_str}")
+            print(f"  ⏳ No final score: {game_str} ({row_date})")
             continue
 
         sd         = scores[matched_key]
@@ -392,8 +438,6 @@ def auto_score(sheet, date_str: str = None) -> int:
 
         hit_miss = determine_hit_miss(bet_type, signal, sd)
 
-        # Queue batch update for all 4 cells
-        tab = TRACKER_TAB
         for col_idx, value in [
             (COL_ACT_AWAY, away_score),
             (COL_ACT_HOME, home_score),
@@ -401,12 +445,12 @@ def auto_score(sheet, date_str: str = None) -> int:
             (COL_HIT_MISS, hit_miss),
         ]:
             updates.append({
-                "range":  f"'{tab}'!{col_letter(col_idx)}{i}",
+                "range":  f"\'{tab}\'!{col_letter(col_idx)}{i}",
                 "values": [[value]],
             })
 
         icon = "✅" if hit_miss == "WIN" else ("❌" if hit_miss == "LOSS" else ("➡️" if hit_miss == "PUSH" else "⏳"))
-        print(f"  {icon} {game_str} | {bet_type} | {away_score}-{home_score} (total {total}) | {hit_miss}")
+        print(f"  {icon} [{row_date}] {game_str} | {bet_type} | {away_score}-{home_score} | {hit_miss}")
         updated += 1
 
     # Batch write to Sheets
@@ -419,7 +463,6 @@ def auto_score(sheet, date_str: str = None) -> int:
             print(f"\n  ✅ Auto-scored {updated} signals ({skipped} already done)")
         except Exception as e:
             print(f"\n  ⚠️  Batch write error: {e}")
-            # Fallback: write one by one
             print("  🔄 Falling back to individual writes...")
             for update in updates:
                 try:
