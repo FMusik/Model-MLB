@@ -57,12 +57,16 @@ MLB_STATS_BASE    = "https://statsapi.mlb.com/api/v1"
 WEIGHT_CAREER     = 0.40
 WEIGHT_SEASON     = 0.35
 WEIGHT_L20        = 0.25
-# Final hit-prob blend (all three components present):
+# Batter hit-prob blend (all three components present):
 #   45% Savant xBA + 35% MLB Stats weighted BA + 20% BPP HitProbability
 # Fallbacks: if xBA missing → 50% BA + 50% BPP; if both BA & xBA missing → 100% BPP.
 BLEND_SAVANT      = 0.45
 BLEND_BA          = 0.35
 BLEND_BPP         = 0.20
+# Pitcher xBA-allowed adjustment to the batter blend (per-game hit prob):
+#   final = (1 - PITCHER_ADJUST) * batter_blend + PITCHER_ADJUST * pitcher_phit
+# If the opposing starter's Savant xBA isn't available, skip the adjustment.
+PITCHER_ADJUST    = 0.30
 
 TODAY_TAB           = "Props Today"
 TRACKER_TAB         = "Props Tracker"
@@ -74,7 +78,7 @@ HEADERS = [
     "Bookmaker", "Odds", "Implied %",
     "BPP HitProb %", "BPP AtBats",
     "Career BA", "Season BA", "L20 BA", "Weighted BA",
-    "Savant xBA",
+    "Savant xBA", "Pitcher xBA",
     "Model Prob",
     "Model Prob %", "Edge %", "Edge Flag",
     "Composite Score", "Rating",
@@ -83,7 +87,7 @@ HEADERS = [
 
 BEST_HEADERS = [
     "Game Time", "Player", "Team", "Line", "Side",
-    "Best Odds", "Best Book", "BPP Hit%", "Savant xBA",
+    "Best Odds", "Best Book", "BPP Hit%", "Savant xBA", "Pitcher xBA",
     "Model Prob%", "Edge%",
     "Rating", "Composite Score",
     "Kelly Units", "MC Win%",
@@ -224,32 +228,49 @@ def load_bpp_batters() -> dict:
     return out
 
 
-def load_bpp_pitcher_hands() -> dict:
-    """Map team-abbreviation -> starting pitcher's throwing hand (R/L).
+def load_bpp_pitchers() -> dict:
+    """team_abbr → {'hand': 'R'|'L'|'', 'player_id': str, 'name': str}.
 
-    Joined later on the batter's Opponent so we know which arm each batter
-    is facing. Returns {} silently if the file or columns are missing — the
-    matchup component will then default to neutral.
+    Joined on the batter's Opponent to attach the opposing starter — used
+    for both the B/P matchup distribution print and the Savant pitcher-xBA
+    lookup. Returns {} silently if the file or required columns are missing.
     """
     if not os.path.exists(PITCHERS_FILE):
-        print(f"  ⚠️  {PITCHERS_FILE} not found — matchup score will default to neutral")
+        print(f"  ⚠️  {PITCHERS_FILE} not found — pitcher matchup/adjust will default to neutral")
         return {}
     df = pd.read_excel(PITCHERS_FILE, engine="openpyxl")
     cols = {c.lower(): c for c in df.columns}
     team_col = cols.get("team")
     hand_col = cols.get("pitcherhand") or cols.get("throws") or cols.get("hand")
-    if not (team_col and hand_col):
-        print(f"  ⚠️  pitchers file missing Team/PitcherHand. Have: {list(df.columns)}")
+    pid_col  = cols.get("playerid") or cols.get("mlbid") or cols.get("id")
+    name_col = next(
+        (cols[k] for k in ("fullname", "player", "name", "playername", "pitcher") if k in cols),
+        None,
+    )
+    if not team_col:
+        print(f"  ⚠️  pitchers file missing Team column. Have: {list(df.columns)}")
         return {}
+
     out = {}
     for _, row in df.iterrows():
         team = str(row[team_col]).strip().upper()
-        hand = str(row[hand_col]).strip().upper()
-        if team and hand and team not in out:
-            out[team] = hand[0]  # first char only ('R'/'L')
-    print(f"  ✅ BPP pitcher hands loaded: {len(out)} teams")
-    sample = list(out.items())[:5]
-    print(f"  🔧 First 5 pitcher_hands entries: {sample}")
+        if not team or team in out:
+            continue  # first row per team = projected starter
+        hand_raw = str(row[hand_col]).strip().upper() if hand_col else ""
+        hand     = hand_raw[0] if hand_raw else ""
+        pid = ""
+        if pid_col is not None:
+            pid_raw = row[pid_col]
+            if pid_raw is not None and not (isinstance(pid_raw, float) and pd.isna(pid_raw)):
+                try:
+                    pid = str(int(float(pid_raw)))
+                except (TypeError, ValueError):
+                    pid = str(pid_raw).strip()
+        name = str(row[name_col]).strip() if name_col else ""
+        out[team] = {"hand": hand, "player_id": pid, "name": name}
+    print(f"  ✅ BPP pitchers loaded: {len(out)} teams")
+    sample = [(t, v["hand"], v["player_id"], v["name"]) for t, v in list(out.items())[:5]]
+    print(f"  🔧 First 5 pitcher entries (team, hand, pid, name): {sample}")
     return out
 
 
@@ -295,6 +316,50 @@ def fetch_savant_xba(season: int) -> dict:
             continue
         out[pid] = xba
     print(f"  ✅ Savant xBA loaded: {len(out)} players (year={season}, minPA=25)")
+    return out
+
+
+def fetch_savant_pitcher_xba(season: int) -> dict:
+    """Return {mlbam_id_str: xba_allowed_float} from pybaseball pitcher expected stats.
+
+    xBA allowed (Statcast `est_ba`) = expected batting average opponents
+    have produced against this pitcher based on quality of contact. Higher
+    = easier to hit (favors the batter Over). Returns {} on any failure so
+    the caller can skip the pitcher adjustment.
+    """
+    try:
+        import pybaseball  # type: ignore
+    except ImportError:
+        print("  ⚠️  pybaseball not installed — skipping Savant pitcher xBA")
+        return {}
+    try:
+        df = pybaseball.statcast_pitcher_expected_stats(year=season, minPA=25)
+    except Exception as e:
+        print(f"  ⚠️  Savant pitcher xBA fetch failed: {e}")
+        return {}
+
+    if df is None or getattr(df, "empty", True):
+        print("  ⚠️  Savant pitcher xBA returned no data")
+        return {}
+
+    cols    = {c.lower(): c for c in df.columns}
+    pid_col = cols.get("player_id") or cols.get("playerid") or cols.get("mlbam_id")
+    xba_col = cols.get("est_ba") or cols.get("xba")
+    if not (pid_col and xba_col):
+        print(f"  ⚠️  Savant pitcher xBA missing player_id/est_ba; have: {list(df.columns)}")
+        return {}
+
+    out = {}
+    for _, row in df.iterrows():
+        try:
+            pid = str(int(float(row[pid_col])))
+            xba = float(row[xba_col])
+        except (TypeError, ValueError):
+            continue
+        if not (0 < xba < 1):
+            continue
+        out[pid] = xba
+    print(f"  ✅ Savant pitcher xBA loaded: {len(out)} pitchers (year={season}, minPA=25)")
     return out
 
 
@@ -595,31 +660,35 @@ def kelly_units(model_prob, american_odds, fraction: float = 0.25,
     return round(units * 2) / 2  # nearest 0.5
 
 
-def monte_carlo_win_prob(season_h, season_ab, bpp_ab, line, side,
+def monte_carlo_win_prob(per_ab_rate, bpp_ab, line, side,
                           n_sims: int = 10_000):
-    """Monte Carlo P(win the bet) using a Beta posterior on the player's hit rate.
+    """Forward Monte Carlo using the model's pitcher-adjusted per-AB hit rate.
 
-    Each sim:
-      1. Draw hit_rate ~ Beta(season_h + 1, season_ab − season_h + 1)
-      2. Simulate bpp_ab Bernoulli trials at that rate
-      3. Count whether resulting hits beat the line on the given side
+    Simulates `bpp_ab` Bernoulli trials at `per_ab_rate` for each of n_sims
+    runs and counts wins by the bet's side. Side semantics (half-lines):
+
+        Over 0.5  → P(hits >= 1)
+        Over 1.5  → P(hits >= 2)
+        Under 0.5 → P(hits == 0)
+        Under 1.5 → P(hits <= 1)
+        Under 2.5 → P(hits <= 2)
+
+    Equivalent to (hits > line) for Over and (hits < line) for Under;
+    whole-number lines push on equality and aren't counted as wins.
     """
-    if season_ab is None or season_ab == 0:
+    if per_ab_rate is None or bpp_ab is None or bpp_ab <= 0:
         return None
-    if bpp_ab is None or bpp_ab <= 0:
+    if not (0 < per_ab_rate < 1):
         return None
     if side not in ("Over", "Under"):
         return None
-    h        = max(0, int(season_h or 0))
-    ab_total = max(h, int(season_ab))
-    alpha    = h + 1
-    beta_p   = (ab_total - h) + 1
-    n_ab     = max(1, int(round(bpp_ab)))
-
-    rates = np.random.beta(alpha, beta_p, size=n_sims)
-    hits  = np.random.binomial(n_ab, rates)
-    wins  = (hits > line).sum() if side == "Over" else (hits < line).sum()
-    return float(wins) / n_sims
+    n_ab = max(1, int(round(bpp_ab)))
+    hits = np.random.binomial(n_ab, per_ab_rate, size=n_sims)
+    if side == "Over":
+        wins = int((hits > line).sum())
+    else:
+        wins = int((hits < line).sum())
+    return wins / n_sims
 
 
 # ── COMPOSITE SCORING ──────────────────────────────────────────
@@ -656,18 +725,26 @@ def match_player(prop_name: str, bpp: dict):
 
 
 # ── BUILD ROWS ─────────────────────────────────────────────────
-def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
+def build_rows(props, bpp, pitchers, confirmed_map=None,
+                savant_xba=None, savant_pitcher_xba=None):
     """Build per-prop rows.
 
     confirmed_map (normalized BPP name → 'YES'/'PENDING') is stashed as an
-    extra column at index 25 — Best Bets and 📊 Tracker pick it up;
+    extra column at index 26 — Best Bets and 📊 Tracker pick it up;
     HEADERS-based writers (Props Today, Props Tracker) slice it off.
 
-    savant_xba (mlbam_id → est_ba) feeds the 45/35/20 blend. Per-player
-    fallbacks: no xBA → 50% BA + 50% BPP; neither xBA nor BA → 100% BPP.
+    savant_xba (mlbam_id → est_ba) feeds the 45/35/20 batter blend. Per-
+    player fallbacks: no xBA → 50/50 BA+BPP; neither xBA nor BA → 100% BPP.
+
+    pitchers (team_abbr → {hand, player_id, name}) + savant_pitcher_xba
+    (mlbam_id → est_ba allowed) drive the pitcher adjustment:
+        final_phit = (1 - PITCHER_ADJUST) * batter_blend + PITCHER_ADJUST * pitcher_phit
+    Skipped (per-row) when the opposing starter's Savant xBA is missing.
     """
-    confirmed_map = confirmed_map or {}
-    savant_xba    = savant_xba or {}
+    confirmed_map      = confirmed_map or {}
+    savant_xba         = savant_xba or {}
+    savant_pitcher_xba = savant_pitcher_xba or {}
+    pitchers           = pitchers or {}
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
@@ -677,6 +754,7 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
     stats_hits    = 0  # players with at least one BA component
     stats_total   = 0  # unique players we tried to fetch
     savant_used   = 0  # players whose blend included Savant xBA
+    pitcher_used  = 0  # rows where the pitcher adjustment was applied
     for p in props:
         rec = match_player(p["player"], bpp)
         if not rec:
@@ -697,11 +775,11 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
         wba       = weighted_ba(career_ba, season_ba, l20_ba)
         xba       = savant_xba.get(pid) if pid else None
 
-        # Blend selection — see BLEND_* constants for the all-three formula.
+        # Batter blend — see BLEND_* constants for the all-three formula.
         if xba is not None and wba is not None:
             xba_phit = ba_to_hit_prob(xba, rec["ab"])
             ba_phit  = ba_to_hit_prob(wba, rec["ab"])
-            blended = (
+            batter_phit = (
                 BLEND_SAVANT * xba_phit
                 + BLEND_BA   * ba_phit
                 + BLEND_BPP  * rec["p_hit"]
@@ -709,22 +787,36 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
             savant_used += 1
         elif wba is not None:
             # No Savant — 50/50 between MLB Stats BA and BPP HitProbability.
-            ba_phit = ba_to_hit_prob(wba, rec["ab"])
-            blended = 0.50 * ba_phit + 0.50 * rec["p_hit"]
+            ba_phit     = ba_to_hit_prob(wba, rec["ab"])
+            batter_phit = 0.50 * ba_phit + 0.50 * rec["p_hit"]
         elif xba is not None:
             # Only Savant available (rare; no MLB BA components) — mirror the
             # BA-only fallback shape so we always have a non-trivial signal.
-            xba_phit = ba_to_hit_prob(xba, rec["ab"])
-            blended = 0.50 * xba_phit + 0.50 * rec["p_hit"]
+            xba_phit    = ba_to_hit_prob(xba, rec["ab"])
+            batter_phit = 0.50 * xba_phit + 0.50 * rec["p_hit"]
             savant_used += 1
         else:
             # Neither — pure BPP HitProbability.
-            blended = rec["p_hit"]
+            batter_phit = rec["p_hit"]
+
+        # Opposing-pitcher adjustment. Look up the BPP starter for the
+        # batter's Opponent team, then their Savant xBA-allowed. When
+        # available, blend at PITCHER_ADJUST weight; otherwise no-op.
+        opp_team    = (rec.get("opp") or "").upper()
+        pitcher_rec = pitchers.get(opp_team, {})
+        pitcher_pid = pitcher_rec.get("player_id", "")
+        pitcher_xba = savant_pitcher_xba.get(pitcher_pid) if pitcher_pid else None
+        if pitcher_xba is not None:
+            pitcher_phit = ba_to_hit_prob(pitcher_xba, rec["ab"])
+            final_phit   = (1 - PITCHER_ADJUST) * batter_phit + PITCHER_ADJUST * pitcher_phit
+            pitcher_used += 1
+        else:
+            final_phit = batter_phit
 
         if p["side"] == "Over":
-            model_p = model_over_prob(blended, rec["ab"], p["line"])
+            model_p = model_over_prob(final_phit, rec["ab"], p["line"])
         elif p["side"] == "Under":
-            model_p = 1 - model_over_prob(blended, rec["ab"], p["line"])
+            model_p = 1 - model_over_prob(final_phit, rec["ab"], p["line"])
         else:
             continue
         imp  = implied_prob(p["price"])
@@ -732,16 +824,16 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
         edge_pct = edge * 100
 
         bs_raw = rec.get("stand", "")
-        ph_raw = pitcher_hands.get(rec.get("opp", ""), "")
+        ph_raw = pitcher_rec.get("hand", "")
         bs = (bs_raw or "").strip().upper()[:1] or "?"
         ph = (ph_raw or "").strip().upper()[:1] or "?"
         bs_ph_counter[(bs, ph)] += 1
 
-        # Bet sizing + MC simulation
-        kelly = kelly_units(model_p, p["price"])
-        mc    = monte_carlo_win_prob(
-            stats.get("season_h"), stats.get("season_ab"),
-            rec["ab"], p["line"], p["side"],
+        # Bet sizing + forward MC over the final pitcher-adjusted per-AB rate.
+        kelly        = kelly_units(model_p, p["price"])
+        final_per_ab = per_ab_hit_prob(final_phit, rec["ab"])
+        mc           = monte_carlo_win_prob(
+            final_per_ab, rec["ab"], p["line"], p["side"],
         )
 
         out.append([
@@ -757,20 +849,21 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
             round(imp * 100, 2),                          # 9  Implied %
             round(rec["p_hit"] * 100, 2),                 # 10 BPP HitProb %
             int(round(rec["ab"])),                        # 11 BPP AtBats
-            round(career_ba, 3) if career_ba is not None else "",  # 12 Career BA
-            round(season_ba, 3) if season_ba is not None else "",  # 13 Season BA
-            round(l20_ba,    3) if l20_ba    is not None else "",  # 14 L20 BA
-            round(wba,       3) if wba       is not None else "",  # 15 Weighted BA
-            round(xba,       3) if xba       is not None else "",  # 16 Savant xBA
-            round(blended * 100, 2),                      # 17 Model Prob
-            round(model_p * 100, 2),                      # 18 Model Prob %
-            round(edge_pct, 2),                           # 19 Edge %
-            "✅" if edge >= EDGE_THRESHOLD else "",        # 20 Edge Flag
-            0.0,    # 21 Composite (filled by percentile post-pass)
-            "",     # 22 Rating (assigned below by rank)
-            kelly,                                        # 23 Kelly Units
-            round(mc * 100, 2) if mc is not None else "", # 24 MC Win%
-            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 25 Confirmed (extra)
+            round(career_ba, 3) if career_ba is not None else "",      # 12 Career BA
+            round(season_ba, 3) if season_ba is not None else "",      # 13 Season BA
+            round(l20_ba,    3) if l20_ba    is not None else "",      # 14 L20 BA
+            round(wba,       3) if wba       is not None else "",      # 15 Weighted BA
+            round(xba,         3) if xba         is not None else "",  # 16 Savant xBA
+            round(pitcher_xba, 3) if pitcher_xba is not None else "",  # 17 Pitcher xBA
+            round(final_phit * 100, 2),                   # 18 Model Prob (pitcher-adjusted)
+            round(model_p   * 100, 2),                    # 19 Model Prob %
+            round(edge_pct, 2),                           # 20 Edge %
+            "✅" if edge >= EDGE_THRESHOLD else "",        # 21 Edge Flag
+            0.0,    # 22 Composite (filled by percentile post-pass)
+            "",     # 23 Rating (assigned below by rank)
+            kelly,                                        # 24 Kelly Units
+            round(mc * 100, 2) if mc is not None else "", # 25 MC Win%
+            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 26 Confirmed (extra)
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -779,6 +872,8 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
         print(f"  📊 MLB Stats API: {stats_hits}/{stats_total} players returned BA components")
     if savant_xba:
         print(f"  📊 Savant xBA used in blend for {savant_used} player-prop rows")
+    if savant_pitcher_xba:
+        print(f"  📊 Pitcher xBA adjustment applied to {pitcher_used} player-prop rows")
     if bs_ph_counter:
         rr = bs_ph_counter.get(("R", "R"), 0)
         rl = bs_ph_counter.get(("R", "L"), 0)
@@ -794,27 +889,27 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
     # Both BPP HitProbability (0.24–0.76 band) and Edge % cluster too tightly
     # for raw-scaled scores to produce real spread; ranking against the day's
     # distribution forces the full 0–100 range.
-    #   r[10] = BPP HitProb %   r[19] = Edge %   r[21] = Composite Score (target)
+    #   r[10] = BPP HitProb %   r[20] = Edge %   r[22] = Composite Score (target)
     if out:
         sorted_hit  = sorted(r[10] for r in out)
-        sorted_edge = sorted(r[19] for r in out)
+        sorted_edge = sorted(r[20] for r in out)
         n           = len(out)
         for r in out:
             hit_pr  = 100.0 * bisect_right(sorted_hit,  r[10]) / n
-            edge_pr = 100.0 * bisect_right(sorted_edge, r[19]) / n
-            r[21]   = round(composite_score(hit_pr, edge_pr), 2)
+            edge_pr = 100.0 * bisect_right(sorted_edge, r[20]) / n
+            r[22]   = round(composite_score(hit_pr, edge_pr), 2)
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
-    # bottom 40% dropped. Composite is at column index 21, rating at 22.
+    # bottom 40% dropped. Composite is at column index 22, rating at 23.
     if out:
-        out.sort(key=lambda r: r[21], reverse=True)
+        out.sort(key=lambda r: r[22], reverse=True)
         n = len(out)
         elite_end  = max(1, int(round(n * 0.10)))
         strong_end = elite_end  + max(0, int(round(n * 0.15)))
         lean_end   = strong_end + max(0, int(round(n * 0.35)))
 
-        scores = [r[21] for r in out]
+        scores = [r[22] for r in out]
         print(
             f"  📊 Composite distribution — n={n} "
             f"min={scores[-1]:.2f} median={scores[n // 2]:.2f} max={scores[0]:.2f}"
@@ -827,10 +922,10 @@ def build_rows(props, bpp, pitcher_hands, confirmed_map=None, savant_xba=None):
         )
 
         for i, r in enumerate(out):
-            if   i < elite_end:  r[22] = "ELITE"
-            elif i < strong_end: r[22] = "STRONG"
-            elif i < lean_end:   r[22] = "LEAN"
-            # else: r[22] stays "" — caller filters per tab.
+            if   i < elite_end:  r[23] = "ELITE"
+            elif i < strong_end: r[23] = "STRONG"
+            elif i < lean_end:   r[23] = "LEAN"
+            # else: r[23] stays "" — caller filters per tab.
 
     return out
 
@@ -845,21 +940,21 @@ def build_best_bets(rows):
 
     Column indices used (against current HEADERS):
       1=Game Time, 2=Player, 3=Team, 5=Line, 6=Side,
-      7=Bookmaker, 8=Odds, 10=BPP HitProb %, 16=Savant xBA,
-      18=Model Prob %, 19=Edge %, 21=Composite, 22=Rating,
-      23=Kelly Units, 24=MC Win%, 25=Confirmed (extra)
+      7=Bookmaker, 8=Odds, 10=BPP HitProb %, 16=Savant xBA, 17=Pitcher xBA,
+      19=Model Prob %, 20=Edge %, 22=Composite, 23=Rating,
+      24=Kelly Units, 25=MC Win%, 26=Confirmed (extra)
     """
     by_player = {}
     for r in rows:
-        if r[22] not in ("ELITE", "STRONG"):
+        if r[23] not in ("ELITE", "STRONG"):
             continue
         # Drop zero-Kelly and negative-edge rows — they aren't real plays.
-        if not isinstance(r[23], (int, float)) or r[23] <= 0:
+        if not isinstance(r[24], (int, float)) or r[24] <= 0:
             continue
-        if not isinstance(r[19], (int, float)) or r[19] <= 0:
+        if not isinstance(r[20], (int, float)) or r[20] <= 0:
             continue
         key = r[2]
-        if key not in by_player or r[19] > by_player[key][19]:
+        if key not in by_player or r[20] > by_player[key][20]:
             by_player[key] = r
 
     bests = []
@@ -874,18 +969,19 @@ def build_best_bets(rows):
             r[7],   # Best Book
             r[10],  # BPP Hit%
             r[16],  # Savant xBA
-            r[18],  # Model Prob%
-            r[19],  # Edge%
-            r[22],  # Rating
-            r[21],  # Composite Score
-            r[23],  # Kelly Units
-            r[24],  # MC Win%
-            r[25] if len(r) > 25 else "",  # Confirmed
+            r[17],  # Pitcher xBA
+            r[19],  # Model Prob%
+            r[20],  # Edge%
+            r[23],  # Rating
+            r[22],  # Composite Score
+            r[24],  # Kelly Units
+            r[25],  # MC Win%
+            r[26] if len(r) > 26 else "",  # Confirmed
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological. Composite is at
-    # column 12 of the Best Bets row (BEST_HEADERS index, after Savant xBA insert).
-    bests.sort(key=lambda b: (b[0], -b[12]))
+    # column 13 of the Best Bets row (BEST_HEADERS index, after Pitcher xBA insert).
+    bests.sort(key=lambda b: (b[0], -b[13]))
     return bests
 
 
@@ -928,30 +1024,30 @@ def build_tracker_rows(rows):
       5  Line          → Line
       6  Side          → Side
       10 BPP HitProb % → BPP Hit%
-      18 Model Prob %  → Model Prob%
-      19 Edge %        → Edge%
-      21 Composite     → Composite Score
-      22 Rating        → Rating
-      23 Kelly Units   → Kelly Units
-      24 MC Win%       → MC Win%
+      19 Model Prob %  → Model Prob%
+      20 Edge %        → Edge%
+      22 Composite     → Composite Score
+      23 Rating        → Rating
+      24 Kelly Units   → Kelly Units
+      25 MC Win%       → MC Win%
       ""               → Result   (manual fill-in)
       ""               → Notes    (manual fill-in)
     """
     by_key = {}
     for r in rows:
-        if r[22] not in ("ELITE", "STRONG"):
+        if r[23] not in ("ELITE", "STRONG"):
             continue
         key = (r[0], r[2], r[5])  # (date, player, line)
-        if key not in by_key or r[19] > by_key[key][19]:
+        if key not in by_key or r[20] > by_key[key][20]:
             by_key[key] = r
 
     out = []
     for r in by_key.values():
         out.append([
             r[0], r[1], r[2], r[3], r[4], r[5], r[6],
-            r[10], r[18], r[19],
-            r[21], r[22],
-            r[23], r[24],
+            r[10], r[19], r[20],
+            r[22], r[23],
+            r[24], r[25],
             "", "",
         ])
     return out
@@ -964,14 +1060,14 @@ def build_manual_tracker_rows(rows):
     """
     by_player = {}
     for r in rows:
-        if r[22] not in ("ELITE", "STRONG"):
+        if r[23] not in ("ELITE", "STRONG"):
             continue
-        if not isinstance(r[23], (int, float)) or r[23] <= 0:
+        if not isinstance(r[24], (int, float)) or r[24] <= 0:
             continue
-        if not isinstance(r[19], (int, float)) or r[19] <= 0:
+        if not isinstance(r[20], (int, float)) or r[20] <= 0:
             continue
         key = r[2]
-        if key not in by_player or r[19] > by_player[key][19]:
+        if key not in by_player or r[20] > by_player[key][20]:
             by_player[key] = r
 
     out = []
@@ -985,13 +1081,13 @@ def build_manual_tracker_rows(rows):
             r[5],   # Line
             r[6],   # Side
             r[10],  # BPP Hit%
-            r[18],  # Model Prob%
-            r[19],  # Edge%
-            r[23],  # Kelly Units
-            r[24],  # MC Win%
-            r[21],  # Composite Score
-            r[22],  # Rating
-            r[25] if len(r) > 25 else "",  # Confirmed
+            r[19],  # Model Prob%
+            r[20],  # Edge%
+            r[24],  # Kelly Units
+            r[25],  # MC Win%
+            r[22],  # Composite Score
+            r[23],  # Rating
+            r[26] if len(r) > 26 else "",  # Confirmed
             "",     # Result
             "",     # Notes
         ])
@@ -1028,7 +1124,7 @@ def write_today(sheet, rows):
     )
     if rows:
         end_row = 1 + len(rows)
-        # Rows may carry extra trailing columns (e.g. r[25] = Confirmed) that
+        # Rows may carry extra trailing columns (e.g. r[26] = Confirmed) that
         # Best Bets / 📊 Tracker read but Props Today does not. Slice to HEADERS.
         sliced = [r[:len(HEADERS)] for r in rows]
         print(f"  🔧 {TODAY_TAB}: writing {len(sliced)} rows → A2:{end_col}{end_row}")
@@ -1210,8 +1306,8 @@ def write_manual_tracker(sheet, manual_rows):
 
 # ── MAIN ───────────────────────────────────────────────────────
 def main():
-    bpp           = load_bpp_batters()
-    pitcher_hands = load_bpp_pitcher_hands()
+    bpp      = load_bpp_batters()
+    pitchers = load_bpp_pitchers()
 
     # Confirmed lineup status — YES/PENDING players are kept (PENDING means
     # their team's lineup isn't posted yet, e.g. early-morning run). NO players
@@ -1239,22 +1335,29 @@ def main():
         f"PENDING: {pending_count} | NO (excluded): {no_count}"
     )
 
-    # Baseball Savant xBA — used in the 45/35/20 hit-prob blend. Empty dict
-    # on any failure; build_rows falls back per-player to the no-Savant 50/50.
-    season     = datetime.date.today().year
-    savant_xba = fetch_savant_xba(season)
+    # Baseball Savant xBA (batters) — feeds the 45/35/20 batter blend.
+    # Pitcher xBA-allowed adjusts the final per-game prob (PITCHER_ADJUST=0.30).
+    # Both return {} on any failure so build_rows falls back per-player.
+    season             = datetime.date.today().year
+    savant_xba         = fetch_savant_xba(season)
+    savant_pitcher_xba = fetch_savant_pitcher_xba(season)
 
     props = get_batter_hits_props()
-    rows  = build_rows(props, bpp, pitcher_hands, confirmed_map, savant_xba)
+    rows  = build_rows(
+        props, bpp, pitchers,
+        confirmed_map=confirmed_map,
+        savant_xba=savant_xba,
+        savant_pitcher_xba=savant_pitcher_xba,
+    )
 
-    # Per-tab views drawn from the same row pool. After the Savant xBA insert,
-    # row indices are: Edge Flag = 20, Composite = 21, Rating = 22.
+    # Per-tab views drawn from the same row pool. After the Pitcher xBA insert,
+    # row indices are: Edge Flag = 21, Composite = 22, Rating = 23.
     #  - Today   = ELITE/STRONG/LEAN (cleared and rewritten daily, full HEADERS)
     #  - Bests   = ELITE/STRONG      (cleared and rewritten daily, BEST_HEADERS)
     #  - Tracker = ELITE/STRONG      (append-only history, TRACKER_HEADERS,
     #                                 deduped to one row per player+line)
     #  - 📊 Tracker = manual-entry tab with header only (created if missing)
-    rated         = [r for r in rows if r[22] in ("ELITE", "STRONG", "LEAN")]
+    rated         = [r for r in rows if r[23] in ("ELITE", "STRONG", "LEAN")]
     bests         = build_best_bets(rated)
     tracker_rows  = build_tracker_rows(rows)
     manual_rows   = build_manual_tracker_rows(rows)
@@ -1265,10 +1368,10 @@ def main():
     write_best_bets(sheet, bests)
     write_manual_tracker(sheet, manual_rows)
 
-    edges  = sum(1 for r in rows if r[20])
-    elite  = sum(1 for r in rated if r[22] == "ELITE")
-    strong = sum(1 for r in rated if r[22] == "STRONG")
-    lean   = sum(1 for r in rated if r[22] == "LEAN")
+    edges  = sum(1 for r in rows if r[21])
+    elite  = sum(1 for r in rated if r[23] == "ELITE")
+    strong = sum(1 for r in rated if r[23] == "STRONG")
+    lean   = sum(1 for r in rated if r[23] == "LEAN")
     print(
         f"\n🎯 Done — {len(rows)} priced props, "
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
