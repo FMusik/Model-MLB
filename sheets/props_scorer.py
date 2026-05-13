@@ -105,8 +105,12 @@ def today_et() -> str:
 
 
 # ── BPP PLAYER-ID MAP ──────────────────────────────────────────
-def load_bpp_id_map() -> dict:
-    """name → MLBAM id from the BPP batters export (best-effort)."""
+def load_bpp_player_info() -> dict:
+    """normalized_name → {'id': MLBAM id, 'team': abbr} from BPP batters export.
+
+    Team is needed for the DNP auto-fill check: if a player's team didn't
+    play (or game isn't final yet) we shouldn't try to score the row.
+    """
     if not os.path.exists(BATTERS_FILE):
         print(f"  ⚠️  {BATTERS_FILE} not found — will fall back to API name search")
         return {}
@@ -120,7 +124,8 @@ def load_bpp_id_map() -> dict:
         (cols[k] for k in ("fullname", "player", "name", "playername", "batter") if k in cols),
         None,
     )
-    pid_col = cols.get("playerid") or cols.get("mlbid") or cols.get("id")
+    pid_col  = cols.get("playerid") or cols.get("mlbid") or cols.get("id")
+    team_col = cols.get("team") or cols.get("teamabbr")
     if not (name_col and pid_col):
         print(f"  ⚠️  BPP batters missing name/PlayerId columns; have: {list(df.columns)}")
         return {}
@@ -132,15 +137,56 @@ def load_bpp_id_map() -> dict:
             continue
         pid_raw = row[pid_col]
         if pid_raw is None or (isinstance(pid_raw, float) and pd.isna(pid_raw)):
-            continue
-        try:
-            pid = str(int(float(pid_raw)))
-        except (TypeError, ValueError):
-            pid = str(pid_raw).strip()
-        if pid:
-            out[normalize_name(name)] = pid
-    print(f"  ✅ BPP MLBAM IDs loaded: {len(out)} players")
+            pid = ""
+        else:
+            try:
+                pid = str(int(float(pid_raw)))
+            except (TypeError, ValueError):
+                pid = str(pid_raw).strip()
+        team = str(row[team_col]).strip().upper() if team_col else ""
+        out[normalize_name(name)] = {"id": pid, "team": team}
+    print(f"  ✅ BPP player info loaded: {len(out)} players")
     return out
+
+
+def fetch_team_game_statuses(date_str: str, session: requests.Session,
+                              cache: dict) -> dict:
+    """Return {team_abbr: status} for date_str from MLB Stats API schedule.
+
+    status is one of 'Final', 'Live', 'Preview', 'Postponed', etc. Teams
+    without a scheduled game that day are absent from the dict — treat as
+    'no game' (DNP eligible).
+    """
+    if date_str in cache:
+        return cache[date_str]
+    try:
+        r = session.get(
+            f"{MLB_STATS_BASE}/schedule",
+            params={"sportId": 1, "date": date_str},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            cache[date_str] = {}
+            return {}
+        data = r.json()
+    except Exception:
+        cache[date_str] = {}
+        return {}
+
+    statuses: dict = {}
+    for date_block in data.get("dates", []):
+        for game in date_block.get("games", []):
+            status = (game.get("status") or {}).get("abstractGameState", "") or ""
+            teams_block = game.get("teams") or {}
+            for side in ("home", "away"):
+                abbr = (
+                    ((teams_block.get(side) or {}).get("team") or {})
+                    .get("abbreviation", "") or ""
+                ).upper()
+                if abbr:
+                    statuses[abbr] = status
+    cache[date_str] = statuses
+    return statuses
 
 
 def search_player_id(name: str, session: requests.Session) -> str:
@@ -164,9 +210,11 @@ def search_player_id(name: str, session: requests.Session) -> str:
 # ── HIT LOOKUP ─────────────────────────────────────────────────
 def fetch_player_gamelog(player_id: str, season: int,
                           session: requests.Session, cache: dict) -> dict:
-    """Return {date: hits_total} for the player's season gameLog. Cached by
-    (player_id, season) so multi-date backfills make at most one API call
-    per player per season."""
+    """Return {date: (hits_total, ab_total)} for the player's season gameLog.
+
+    Cached by (player_id, season) so multi-date backfills make at most one
+    API call per player per season. Doubleheaders are summed.
+    """
     key = (player_id, season)
     if key in cache:
         return cache[key]
@@ -195,11 +243,14 @@ def fetch_player_gamelog(player_id: str, season: int,
             d = s.get("date") or (s.get("gameDate", "") or "")[:10]
             if not d:
                 continue
+            stat = s.get("stat") or {}
             try:
-                hits = int(s.get("stat", {}).get("hits", 0))
+                hits = int(stat.get("hits", 0))
+                ab   = int(stat.get("atBats", 0))
             except (TypeError, ValueError):
                 continue
-            by_date[d] = by_date.get(d, 0) + hits  # doubleheader: sum games
+            prev_hits, prev_ab = by_date.get(d, (0, 0))
+            by_date[d] = (prev_hits + hits, prev_ab + ab)
     cache[key] = by_date
     return by_date
 
@@ -319,19 +370,21 @@ def main(argv=None):
 
     print(f"  📋 {len(candidates)} candidate row(s) to score")
 
-    bpp_id_map     = load_bpp_id_map()
+    bpp_info       = load_bpp_player_info()
     session        = requests.Session()
     id_cache       = {}  # normalized name → mlbam id
-    gamelog_cache  = {}  # (mlbam_id, season) → {date: hits}
+    gamelog_cache  = {}  # (mlbam_id, season) → {date: (hits, ab)}
+    status_cache   = {}  # date_str → {team_abbr: game status}
 
     updates = []
-    scored, no_data, no_id = 0, 0, 0
+    scored, no_data, no_id, dnp_count = 0, 0, 0, 0
     result_col = _col_letter(result_idx + 1)
 
     for sheet_row, target_date, player, line, side in candidates:
-        key = normalize_name(player)
+        key  = normalize_name(player)
+        info = bpp_info.get(key) or {}
         if key not in id_cache:
-            pid = bpp_id_map.get(key, "") or search_player_id(player, session)
+            pid = info.get("id", "") or search_player_id(player, session)
             id_cache[key] = pid
         pid = id_cache[key]
         if not pid:
@@ -341,26 +394,46 @@ def main(argv=None):
 
         season  = int(target_date[:4])
         gamelog = fetch_player_gamelog(pid, season, session, gamelog_cache)
-        hits    = gamelog.get(target_date)
-        if hits is None:
-            no_data += 1
+        entry   = gamelog.get(target_date)  # (hits, ab) or None
+
+        if entry is not None and entry[1] > 0:
+            hits = entry[0]
+            result = score_result(line, side, hits)
+            if not result:
+                continue
+            updates.append({
+                "range":  f"{result_col}{sheet_row}",
+                "values": [[result]],
+            })
+            scored += 1
+            print(f"  ✅ {target_date} {player}: {side} {line} | hits={hits} → {result}")
             continue
 
-        result = score_result(line, side, hits)
-        if not result:
-            continue
+        # No at-bats recorded for the target date. DNP candidate: either the
+        # player's team didn't play, or they were on the roster but never
+        # came to bat. Skip if the game is still live so we don't mark DNP
+        # prematurely; otherwise auto-fill DNP.
+        player_team = info.get("team", "")
+        if player_team:
+            statuses    = fetch_team_game_statuses(target_date, session, status_cache)
+            team_status = statuses.get(player_team, "")
+            if team_status in ("Live", "Preview"):
+                no_data += 1
+                continue
 
         updates.append({
             "range":  f"{result_col}{sheet_row}",
-            "values": [[result]],
+            "values": [["DNP"]],
         })
-        scored += 1
-        print(f"  ✅ {target_date} {player}: {side} {line} | hits={hits} → {result}")
+        dnp_count += 1
+        ab_note = f"AB={entry[1]}" if entry is not None else "no game log"
+        print(f"  ⏸️  {target_date} {player}: {ab_note} → DNP")
 
     if updates:
         ws.batch_update(updates, value_input_option="USER_ENTERED")
         print(
-            f"\n🎯 Auto-scored {scored} row(s) | "
+            f"\n🎯 Auto-scored {scored} W/L/P + {dnp_count} DNP "
+            f"({len(updates)} total) | "
             f"{no_data} player(s) with no game data | {no_id} unmapped"
         )
     else:

@@ -80,6 +80,7 @@ BEST_HEADERS = [
     "Best Odds", "Best Book", "BPP Hit%", "Model Prob%", "Edge%",
     "Rating", "Composite Score",
     "Kelly Units", "MC Win%",
+    "Confirmed",
 ]
 
 TRACKER_HEADERS = [
@@ -95,6 +96,7 @@ MANUAL_TRACKER_HEADERS = [
     "BPP Hit%", "Model Prob%", "Edge%",
     "Kelly Units", "MC Win%",
     "Composite Score", "Rating",
+    "Confirmed",
     "Result", "Notes",
 ]
 
@@ -248,9 +250,11 @@ def load_bpp_pitcher_hands() -> dict:
 def fetch_confirmed_lineups():
     """Pull today's confirmed lineups from the MLB Stats API.
 
-    Returns (names: set[str], ids: set[str]). Both empty means no lineups
-    have been posted yet (early-morning run) — callers should fall back to
-    using every BPP batter with a warning.
+    Returns (teams_with_lineups, names, ids):
+      - teams_with_lineups: set of team abbreviations whose lineup is posted
+      - names: normalized names of all confirmed starters across all games
+      - ids:   player_id strings of all confirmed starters
+    All empty means no lineups posted yet (early-morning run).
     """
     today = datetime.date.today().isoformat()
     try:
@@ -261,20 +265,33 @@ def fetch_confirmed_lineups():
         )
         if r.status_code != 200:
             print(f"  ⚠️  Lineups fetch failed: HTTP {r.status_code}")
-            return set(), set()
+            return set(), set(), set()
         data = r.json()
     except Exception as e:
         print(f"  ⚠️  Lineups fetch error: {e}")
-        return set(), set()
+        return set(), set(), set()
 
-    names, ids = set(), set()
+    teams_with_lineups, names, ids = set(), set(), set()
     games_with_lineups = 0
     for date_block in data.get("dates", []):
         for game in date_block.get("games", []):
             lineups = game.get("lineups") or {}
+            teams_block = game.get("teams") or {}
             had = False
-            for side_key in ("homePlayers", "awayPlayers"):
-                for player in lineups.get(side_key) or []:
+            for side_key, side_team in (
+                ("homePlayers", "home"),
+                ("awayPlayers", "away"),
+            ):
+                players_list = lineups.get(side_key) or []
+                if not players_list:
+                    continue
+                team_abbr = (
+                    ((teams_block.get(side_team) or {}).get("team") or {})
+                    .get("abbreviation", "") or ""
+                ).upper()
+                if team_abbr:
+                    teams_with_lineups.add(team_abbr)
+                for player in players_list:
                     nm  = player.get("fullName") or ""
                     pid = player.get("id")
                     if nm:
@@ -284,19 +301,29 @@ def fetch_confirmed_lineups():
                         ids.add(str(pid))
             if had:
                 games_with_lineups += 1
-    print(f"  ✅ Confirmed lineups loaded: {games_with_lineups} games, {len(names)} batters")
-    return names, ids
+    print(
+        f"  ✅ Confirmed lineups loaded: {games_with_lineups} games, "
+        f"{len(names)} batters, {len(teams_with_lineups)} teams posted"
+    )
+    return teams_with_lineups, names, ids
 
 
-def filter_to_confirmed(bpp: dict, names: set, ids: set) -> dict:
-    """Return only the BPP batters whose name or PlayerId appears in lineups."""
-    if not names and not ids:
-        return bpp
-    return {
-        key: rec
-        for key, rec in bpp.items()
-        if key in names or (rec.get("player_id") and rec["player_id"] in ids)
-    }
+def determine_confirmed_status(rec, teams_with_lineups, names, ids) -> str:
+    """Per-player 'YES' / 'NO' / 'PENDING' from confirmed-lineup state.
+
+    YES     player appears in a posted lineup
+    NO      their team's lineup is posted but they're not in it (benched)
+    PENDING their team's lineup has not been posted yet (morning run)
+    """
+    pid  = rec.get("player_id", "")
+    key  = normalize_name(rec.get("name", ""))
+    team = (rec.get("team") or "").upper()
+
+    if key in names or (pid and pid in ids):
+        return "YES"
+    if team in teams_with_lineups:
+        return "NO"
+    return "PENDING"
 
 
 # ── ODDS API ───────────────────────────────────────────────────
@@ -577,7 +604,12 @@ def match_player(prop_name: str, bpp: dict):
 
 
 # ── BUILD ROWS ─────────────────────────────────────────────────
-def build_rows(props, bpp, pitcher_hands):
+def build_rows(props, bpp, pitcher_hands, confirmed_map=None):
+    """Build per-prop rows. confirmed_map (normalized BPP name → 'YES'/'PENDING')
+    is stashed as an extra column at index 24 — Best Bets and 📊 Tracker pick
+    it up; HEADERS-based writers (Props Today, Props Tracker) ignore it.
+    """
+    confirmed_map = confirmed_map or {}
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
@@ -660,6 +692,7 @@ def build_rows(props, bpp, pitcher_hands):
             "",    # rating assigned below by rank
             kelly,
             round(mc * 100, 2) if mc is not None else "",
+            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # r[24]
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -740,6 +773,11 @@ def build_best_bets(rows):
     for r in rows:
         if r[21] not in ("ELITE", "STRONG"):
             continue
+        # Drop zero-Kelly and negative-edge rows — they aren't real plays.
+        if not isinstance(r[22], (int, float)) or r[22] <= 0:
+            continue
+        if not isinstance(r[18], (int, float)) or r[18] <= 0:
+            continue
         key = r[2]
         if key not in by_player or r[18] > by_player[key][18]:
             by_player[key] = r
@@ -761,6 +799,7 @@ def build_best_bets(rows):
             r[20],  # Composite Score
             r[22],  # Kelly Units
             r[23],  # MC Win%
+            r[24] if len(r) > 24 else "",  # Confirmed
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological. Composite is at
@@ -840,10 +879,15 @@ def build_tracker_rows(rows):
 def build_manual_tracker_rows(rows):
     """Same selection as Best Bets (ELITE/STRONG, one row per player, highest
     Edge %), mapped to MANUAL_TRACKER_HEADERS shape with Result/Notes blank.
+    Same filters as Best Bets: Kelly > 0 and Edge% > 0.
     """
     by_player = {}
     for r in rows:
         if r[21] not in ("ELITE", "STRONG"):
+            continue
+        if not isinstance(r[22], (int, float)) or r[22] <= 0:
+            continue
+        if not isinstance(r[18], (int, float)) or r[18] <= 0:
             continue
         key = r[2]
         if key not in by_player or r[18] > by_player[key][18]:
@@ -866,6 +910,7 @@ def build_manual_tracker_rows(rows):
             r[23],  # MC Win%
             r[20],  # Composite Score
             r[21],  # Rating
+            r[24] if len(r) > 24 else "",  # Confirmed
             "",     # Result
             "",     # Notes
         ])
@@ -902,10 +947,13 @@ def write_today(sheet, rows):
     )
     if rows:
         end_row = 1 + len(rows)
-        print(f"  🔧 {TODAY_TAB}: writing {len(rows)} rows → A2:{end_col}{end_row}")
+        # Rows may carry extra trailing columns (e.g. r[24] = Confirmed) that
+        # Best Bets / 📊 Tracker read but Props Today does not. Slice to HEADERS.
+        sliced = [r[:len(HEADERS)] for r in rows]
+        print(f"  🔧 {TODAY_TAB}: writing {len(sliced)} rows → A2:{end_col}{end_row}")
         ws.update(
             range_name=f"A2:{end_col}{end_row}",
-            values=rows,
+            values=sliced,
             value_input_option="USER_ENTERED",
         )
     print(f"  ✅ {TODAY_TAB}: header + {len(rows)} rows")
@@ -1084,18 +1132,34 @@ def main():
     bpp           = load_bpp_batters()
     pitcher_hands = load_bpp_pitcher_hands()
 
-    # Confirmed lineup filter — early runs (no lineups yet) keep all BPP
-    # batters; later runs trim to only players in posted lineups.
-    confirmed_names, confirmed_ids = fetch_confirmed_lineups()
-    if confirmed_names or confirmed_ids:
-        before = len(bpp)
-        bpp = filter_to_confirmed(bpp, confirmed_names, confirmed_ids)
-        print(f"  ✅ Confirmed lineup filter: {len(bpp)}/{before} BPP batters in posted lineups")
-    else:
-        print(f"  ⚠️  No confirmed lineups yet — using all {len(bpp)} BPP batters")
+    # Confirmed lineup status — YES/PENDING players are kept (PENDING means
+    # their team's lineup isn't posted yet, e.g. early-morning run). NO players
+    # are dropped entirely: their team's lineup IS posted but they're benched.
+    teams_with_lineups, confirmed_names, confirmed_ids = fetch_confirmed_lineups()
+    confirmed_map = {}  # normalized BPP name → 'YES' | 'PENDING'
+    new_bpp = {}
+    yes_count = pending_count = no_count = 0
+    for key, rec in bpp.items():
+        status = determine_confirmed_status(
+            rec, teams_with_lineups, confirmed_names, confirmed_ids,
+        )
+        if status == "NO":
+            no_count += 1
+            continue
+        if status == "YES":
+            yes_count += 1
+        else:
+            pending_count += 1
+        confirmed_map[key] = status
+        new_bpp[key]       = rec
+    bpp = new_bpp
+    print(
+        f"  ✅ Confirmed status — YES: {yes_count} | "
+        f"PENDING: {pending_count} | NO (excluded): {no_count}"
+    )
 
     props = get_batter_hits_props()
-    rows  = build_rows(props, bpp, pitcher_hands)
+    rows  = build_rows(props, bpp, pitcher_hands, confirmed_map)
 
     # Per-tab views drawn from the same row pool. Rating is now at index 21,
     # Edge Flag at 19, after dropping the Matchup column from HEADERS.
