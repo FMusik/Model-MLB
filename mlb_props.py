@@ -1078,22 +1078,33 @@ def write_best_bets(sheet, best_rows):
         value_input_option="USER_ENTERED",
     )
 
-    # Defensive dedup by (Player, Line, Side). build_best_bets already keeps
-    # one row per player, but this catches any future code path that doesn't
-    # — the tab is cleared each run so cross-run dupes aren't possible.
-    seen, deduped, dupes = set(), [], 0
+    # Dedup by (Player, normLine, Side) keeping the highest-Edge% row.
+    # Date is implied as "today" across the tab, so it's omitted from the
+    # key. BEST_HEADERS layout: Player=1, Line=3, Side=4, Edge%=14.
+    best_for_key: dict = {}
+    key_order: list = []
+    ungroupable: list = []
     for b in best_rows:
-        if len(b) <= 4:
-            deduped.append(b)
+        if len(b) <= 14:
+            ungroupable.append(b)
             continue
-        key = (b[1], _normalize_line(b[3]), b[4])  # Player, Line, Side
-        if key in seen:
-            dupes += 1
-            continue
-        seen.add(key)
-        deduped.append(b)
+        key = (b[1], _normalize_line(b[3]), b[4])
+        new_edge = b[14] if isinstance(b[14], (int, float)) else -float("inf")
+        if key not in best_for_key:
+            best_for_key[key] = b
+            key_order.append(key)
+        else:
+            existing = best_for_key[key]
+            existing_edge = existing[14] if isinstance(existing[14], (int, float)) else -float("inf")
+            if new_edge > existing_edge:
+                best_for_key[key] = b
+    deduped = ungroupable + [best_for_key[k] for k in key_order]
+    dupes   = len(best_rows) - len(deduped)
     if dupes:
-        print(f"  🧹 {BEST_TAB}: dropped {dupes} duplicate (player, line, side) rows")
+        print(
+            f"  🧹 {BEST_TAB}: collapsed {dupes} duplicate (player, line, side) "
+            f"row(s) — kept highest Edge%"
+        )
 
     if deduped:
         end_row = 1 + len(deduped)
@@ -1222,24 +1233,35 @@ def write_today(sheet, rows):
         value_input_option="USER_ENTERED",
     )
 
-    # Defensive intra-run dedup by (Date, Player, Line, Side, Bookmaker).
-    # The tab is cleared on every write so cross-run dupes can't occur, but
-    # this guards against the Odds API ever returning duplicate outcomes for
-    # the same book+market on the same prop. Different bookmakers per
-    # (player, line, side) are intentionally kept — that's the price compare.
-    seen, deduped, dupes = set(), [], 0
+    # Dedup by (Date, Player, normLine, Side) keeping the highest-Edge% row
+    # per group. This collapses multi-bookmaker rows to the single best line
+    # per prop, per the all-tabs rule "one row per (Date, Player, Line, Side),
+    # highest Edge% wins". HEADERS row layout: Date=0, Player=2, Line=5,
+    # Side=6, Edge%=20.
+    best_for_key: dict = {}
+    key_order: list = []
+    ungroupable: list = []
     for r in rows:
-        if len(r) <= 7:
-            deduped.append(r)
+        if len(r) <= 20:
+            ungroupable.append(r)
             continue
-        key = (r[0], r[2], _normalize_line(r[5]), r[6], r[7])
-        if key in seen:
-            dupes += 1
-            continue
-        seen.add(key)
-        deduped.append(r)
+        key = (r[0], r[2], _normalize_line(r[5]), r[6])
+        new_edge = r[20] if isinstance(r[20], (int, float)) else -float("inf")
+        if key not in best_for_key:
+            best_for_key[key] = r
+            key_order.append(key)
+        else:
+            existing = best_for_key[key]
+            existing_edge = existing[20] if isinstance(existing[20], (int, float)) else -float("inf")
+            if new_edge > existing_edge:
+                best_for_key[key] = r
+    deduped = ungroupable + [best_for_key[k] for k in key_order]
+    dupes   = len(rows) - len(deduped)
     if dupes:
-        print(f"  🧹 {TODAY_TAB}: dropped {dupes} duplicate (date, player, line, side, book) rows")
+        print(
+            f"  🧹 {TODAY_TAB}: collapsed {dupes} duplicate (date, player, line, side) "
+            f"row(s) — kept highest Edge%"
+        )
 
     if deduped:
         end_row = 1 + len(deduped)
@@ -1322,15 +1344,125 @@ def append_tracker(sheet, tracker_rows):
     print(f"  ✅ {TRACKER_TAB}: appended {len(aligned)} ELITE/STRONG rows")
 
 
+def _row_edge(row, edge_idx) -> float:
+    """Read Edge% as float from a sheet row; -inf if missing/unparseable so
+    such rows never win a dedup tie."""
+    if edge_idx is None or edge_idx >= len(row):
+        return -float("inf")
+    try:
+        return float(row[edge_idx])
+    except (TypeError, ValueError):
+        return -float("inf")
+
+
+def _cleanup_manual_tracker_duplicates(sheet, ws, all_values, first_row):
+    """Remove pre-existing duplicate rows in 📊 Tracker.
+
+    Groups by (Date, Player, normLine, Side); within each group the row
+    with the highest Edge% wins (later sheet row wins ties). Non-empty
+    Result/Notes from any loser are promoted onto the winner's row first so
+    manual W/L/P fills aren't lost. Losers are deleted via batch
+    deleteDimension in descending row order.
+
+    Returns the refreshed all_values after deletions (or the original if no
+    cleanup was needed). This only fires once per run — the in-memory dedup
+    below then guards future appends.
+    """
+    try:
+        date_idx   = first_row.index("Date")
+        player_idx = first_row.index("Player")
+        line_idx   = first_row.index("Line")
+        side_idx   = first_row.index("Side")
+    except ValueError:
+        return all_values
+
+    edge_idx   = first_row.index("Edge%")  if "Edge%"  in first_row else None
+    result_idx = first_row.index("Result") if "Result" in first_row else None
+    notes_idx  = first_row.index("Notes")  if "Notes"  in first_row else None
+    if edge_idx is None:
+        # No way to choose a winner — skip cleanup.
+        return all_values
+
+    key_max_idx = max(date_idx, player_idx, line_idx, side_idx, edge_idx)
+    groups: dict = {}  # key → list of (sheet_row_1based, row_values_copy, edge_float)
+    for i, row in enumerate(all_values[1:], start=2):
+        if key_max_idx >= len(row):
+            continue
+        key = (
+            row[date_idx],
+            row[player_idx],
+            _normalize_line(row[line_idx]),
+            row[side_idx],
+        )
+        groups.setdefault(key, []).append((i, list(row), _row_edge(row, edge_idx)))
+
+    cell_updates   = []
+    rows_to_delete = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Winner: highest edge, tie-break by later row index (latest run).
+        winner = max(members, key=lambda m: (m[2], m[0]))
+        winner_idx, winner_row, _ = winner
+        losers = [m for m in members if m[0] != winner_idx]
+
+        # Promote a non-empty Result/Notes from any loser onto the winner row.
+        for col_idx in (result_idx, notes_idx):
+            if col_idx is None:
+                continue
+            winner_val = winner_row[col_idx] if col_idx < len(winner_row) else ""
+            if winner_val.strip():
+                continue
+            for _, lr, _ in losers:
+                if col_idx < len(lr) and lr[col_idx].strip():
+                    col_letter = _col_letter(col_idx + 1)
+                    cell_updates.append({
+                        "range":  f"{col_letter}{winner_idx}",
+                        "values": [[lr[col_idx]]],
+                    })
+                    break
+
+        rows_to_delete.extend(m[0] for m in losers)
+
+    if not rows_to_delete:
+        return all_values
+
+    if cell_updates:
+        ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
+        print(
+            f"  🔄 {MANUAL_TRACKER_TAB}: promoted {len(cell_updates)} Result/Notes "
+            f"cell(s) onto dedup winners"
+        )
+
+    rows_to_delete.sort(reverse=True)
+    try:
+        sheet_id = ws.id
+    except AttributeError:
+        sheet_id = ws._properties.get("sheetId")
+    delete_requests = [
+        {
+            "deleteDimension": {
+                "range": {
+                    "sheetId":    sheet_id,
+                    "dimension":  "ROWS",
+                    "startIndex": ri - 1,
+                    "endIndex":   ri,
+                }
+            }
+        }
+        for ri in rows_to_delete
+    ]
+    sheet.batch_update({"requests": delete_requests})
+    print(f"  🧹 {MANUAL_TRACKER_TAB}: deleted {len(rows_to_delete)} duplicate row(s)")
+    return ws.get_all_values()
+
+
 def write_manual_tracker(sheet, manual_rows):
     """Append Best-Bets-equivalent rows to '📊 Tracker', deduped against
     existing rows by (Date, Player, Line, Side). NEVER clears the tab.
-    Result and Notes columns stay blank for manual fill-in (W/L/P) after
-    each game.
-
-    Schema policy mirrors Props Tracker: missing columns are added to the
-    RIGHT of existing ones; new rows are aligned to the SHEET'S column
-    order so values land under the matching column name.
+    Pre-existing duplicate rows from older runs are actively removed first
+    (highest Edge% wins, Result/Notes preserved); the in-memory dedup then
+    keeps the tab clean going forward.
     """
     n_cols  = len(MANUAL_TRACKER_HEADERS)
     end_col = _col_letter(n_cols)
@@ -1377,6 +1509,11 @@ def write_manual_tracker(sheet, manual_rows):
             )
             first_row = first_row + missing
             print(f"  ➕ {MANUAL_TRACKER_TAB}: added {len(missing)} new column(s) → {missing}")
+
+    # Actively delete pre-existing duplicates before doing anything else.
+    # This is what cleans up duplicate rows that accumulated from older runs
+    # — without it, the dedup below only prevents *future* duplicates.
+    all_values = _cleanup_manual_tracker_duplicates(sheet, ws, all_values, first_row)
 
     if not manual_rows:
         print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 candidate rows from Best Bets")
