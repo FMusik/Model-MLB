@@ -194,6 +194,20 @@ def normalize_name(s: str) -> str:
     return " ".join(s.split())
 
 
+def _normalize_line(v) -> str:
+    """Canonical dedup string for a Line value.
+
+    Sheets writes 1.0 back as "1" (trailing zeros stripped) while build_rows
+    keeps lines as floats, so str(1.0)="1.0" never matches the sheet's "1".
+    Normalizing both sides to "1.0" / "1.5" / "2.5" fixes the false-negative
+    on whole-number lines.
+    """
+    try:
+        return f"{float(v):.1f}"
+    except (TypeError, ValueError):
+        return str(v).strip()
+
+
 # ── BPP BATTERS ────────────────────────────────────────────────
 def load_bpp_batters() -> dict:
     if not os.path.exists(BATTERS_FILE):
@@ -1063,15 +1077,33 @@ def write_best_bets(sheet, best_rows):
         values=[BEST_HEADERS],
         value_input_option="USER_ENTERED",
     )
-    if best_rows:
-        end_row = 1 + len(best_rows)
-        print(f"  🔧 {BEST_TAB}: writing {len(best_rows)} rows → A2:{end_col}{end_row}")
+
+    # Defensive dedup by (Player, Line, Side). build_best_bets already keeps
+    # one row per player, but this catches any future code path that doesn't
+    # — the tab is cleared each run so cross-run dupes aren't possible.
+    seen, deduped, dupes = set(), [], 0
+    for b in best_rows:
+        if len(b) <= 4:
+            deduped.append(b)
+            continue
+        key = (b[1], _normalize_line(b[3]), b[4])  # Player, Line, Side
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        deduped.append(b)
+    if dupes:
+        print(f"  🧹 {BEST_TAB}: dropped {dupes} duplicate (player, line, side) rows")
+
+    if deduped:
+        end_row = 1 + len(deduped)
+        print(f"  🔧 {BEST_TAB}: writing {len(deduped)} rows → A2:{end_col}{end_row}")
         ws.update(
             range_name=f"A2:{end_col}{end_row}",
-            values=best_rows,
+            values=deduped,
             value_input_option="USER_ENTERED",
         )
-    print(f"  ✅ {BEST_TAB}: header + {len(best_rows)} rows")
+    print(f"  ✅ {BEST_TAB}: header + {len(deduped)} rows")
 
 
 # ── PROPS TRACKER ──────────────────────────────────────────────
@@ -1189,18 +1221,38 @@ def write_today(sheet, rows):
         values=[HEADERS],
         value_input_option="USER_ENTERED",
     )
-    if rows:
-        end_row = 1 + len(rows)
+
+    # Defensive intra-run dedup by (Date, Player, Line, Side, Bookmaker).
+    # The tab is cleared on every write so cross-run dupes can't occur, but
+    # this guards against the Odds API ever returning duplicate outcomes for
+    # the same book+market on the same prop. Different bookmakers per
+    # (player, line, side) are intentionally kept — that's the price compare.
+    seen, deduped, dupes = set(), [], 0
+    for r in rows:
+        if len(r) <= 7:
+            deduped.append(r)
+            continue
+        key = (r[0], r[2], _normalize_line(r[5]), r[6], r[7])
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        deduped.append(r)
+    if dupes:
+        print(f"  🧹 {TODAY_TAB}: dropped {dupes} duplicate (date, player, line, side, book) rows")
+
+    if deduped:
+        end_row = 1 + len(deduped)
         # Rows may carry an extra trailing Confirmed column (r[29]) that
         # Best Bets / 📊 Tracker read but Props Today does not. Slice to HEADERS.
-        sliced = [r[:len(HEADERS)] for r in rows]
+        sliced = [r[:len(HEADERS)] for r in deduped]
         print(f"  🔧 {TODAY_TAB}: writing {len(sliced)} rows → A2:{end_col}{end_row}")
         ws.update(
             range_name=f"A2:{end_col}{end_row}",
             values=sliced,
             value_input_option="USER_ENTERED",
         )
-    print(f"  ✅ {TODAY_TAB}: header + {len(rows)} rows")
+    print(f"  ✅ {TODAY_TAB}: header + {len(deduped)} rows")
 
 
 def append_tracker(sheet, tracker_rows):
@@ -1272,8 +1324,9 @@ def append_tracker(sheet, tracker_rows):
 
 def write_manual_tracker(sheet, manual_rows):
     """Append Best-Bets-equivalent rows to '📊 Tracker', deduped against
-    existing rows by (Date, Player, Line). NEVER clears the tab. Result and
-    Notes columns stay blank for manual fill-in (W/L/P) after each game.
+    existing rows by (Date, Player, Line, Side). NEVER clears the tab.
+    Result and Notes columns stay blank for manual fill-in (W/L/P) after
+    each game.
 
     Schema policy mirrors Props Tracker: missing columns are added to the
     RIGHT of existing ones; new rows are aligned to the SHEET'S column
@@ -1329,25 +1382,42 @@ def write_manual_tracker(sheet, manual_rows):
         print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 candidate rows from Best Bets")
         return
 
-    # Build (Date, Player, Line) dedup key set from existing data rows.
+    # Build (Date, Player, normLine, Side) dedup key set from existing rows.
+    # _normalize_line bridges the Sheets-vs-Python representation gap (e.g.
+    # whole-number lines come back as "1" from the sheet but the build_rows
+    # value is float 1.0 → str() = "1.0"); without normalization the dedup
+    # key never matches and duplicates accumulate.
     try:
         date_idx   = first_row.index("Date")
         player_idx = first_row.index("Player")
         line_idx   = first_row.index("Line")
-    except ValueError:
-        date_idx = player_idx = line_idx = None
+        side_idx   = first_row.index("Side")
+    except ValueError as exc:
+        print(f"  ⚠️  {MANUAL_TRACKER_TAB}: missing key column ({exc}); skipping dedup")
+        date_idx = player_idx = line_idx = side_idx = None
 
     existing_keys = set()
-    if date_idx is not None and player_idx is not None and line_idx is not None:
+    if None not in (date_idx, player_idx, line_idx, side_idx):
+        max_idx = max(date_idx, player_idx, line_idx, side_idx)
         for row in all_values[1:]:
-            if max(date_idx, player_idx, line_idx) < len(row):
-                existing_keys.add((row[date_idx], row[player_idx], row[line_idx]))
+            if max_idx < len(row):
+                existing_keys.add((
+                    row[date_idx],
+                    row[player_idx],
+                    _normalize_line(row[line_idx]),
+                    row[side_idx],
+                ))
 
-    # Filter to rows whose (Date, Player, Line) isn't already logged.
+    # Filter to rows whose (Date, Player, Line, Side) isn't already logged.
     new_rows, skipped = [], 0
     for row in manual_rows:
         d   = dict(zip(MANUAL_TRACKER_HEADERS, row))
-        key = (str(d.get("Date", "")), str(d.get("Player", "")), str(d.get("Line", "")))
+        key = (
+            str(d.get("Date", "")),
+            str(d.get("Player", "")),
+            _normalize_line(d.get("Line", "")),
+            str(d.get("Side", "")),
+        )
         if key in existing_keys:
             skipped += 1
             continue
