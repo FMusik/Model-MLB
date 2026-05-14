@@ -210,6 +210,22 @@ def _normalize_line(v) -> str:
         return str(v).strip()
 
 
+def _dedup_key(date, player, line, side) -> tuple:
+    """Canonical (Date, Player, Line, Side) dedup key.
+
+    Player goes through normalize_name and Side is stripped+lowercased so
+    subtle whitespace/case drift between runs (or between the sheet's stored
+    value and a fresh Odds-API value) can't split true duplicates into
+    separate groups — that was why duplicate rows kept surviving cleanup.
+    """
+    return (
+        str(date).strip(),
+        normalize_name(player),
+        _normalize_line(line),
+        str(side).strip().lower(),
+    )
+
+
 # ── BPP BATTERS ────────────────────────────────────────────────
 def load_bpp_batters() -> dict:
     if not os.path.exists(BATTERS_FILE):
@@ -1416,13 +1432,9 @@ def _cleanup_manual_tracker_duplicates(sheet, ws, all_values, first_row):
     for i, row in enumerate(all_values[1:], start=2):
         if key_max_idx >= len(row):
             continue
-        key = (
-            row[date_idx],
-            row[player_idx],
-            _normalize_line(row[line_idx]),
-            row[side_idx],
-        )
-        groups.setdefault(key, []).append((i, list(row), _row_edge(row, edge_idx)))
+        groups.setdefault(_dedup_key(
+            row[date_idx], row[player_idx], row[line_idx], row[side_idx],
+        ), []).append((i, list(row), _row_edge(row, edge_idx)))
 
     cell_updates   = []
     rows_to_delete = []
@@ -1566,22 +1578,17 @@ def write_manual_tracker(sheet, manual_rows):
         max_idx = max(date_idx, player_idx, line_idx, side_idx)
         for row in all_values[1:]:
             if max_idx < len(row):
-                existing_keys.add((
-                    row[date_idx],
-                    row[player_idx],
-                    _normalize_line(row[line_idx]),
-                    row[side_idx],
+                existing_keys.add(_dedup_key(
+                    row[date_idx], row[player_idx], row[line_idx], row[side_idx],
                 ))
 
     # Filter to rows whose (Date, Player, Line, Side) isn't already logged.
     new_rows, skipped = [], 0
     for row in manual_rows:
         d   = dict(zip(MANUAL_TRACKER_HEADERS, row))
-        key = (
-            str(d.get("Date", "")),
-            str(d.get("Player", "")),
-            _normalize_line(d.get("Line", "")),
-            str(d.get("Side", "")),
+        key = _dedup_key(
+            d.get("Date", ""), d.get("Player", ""),
+            d.get("Line", ""), d.get("Side", ""),
         )
         if key in existing_keys:
             skipped += 1
