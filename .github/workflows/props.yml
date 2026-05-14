@@ -23,7 +23,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install gspread google-auth requests pandas numpy scipy openpyxl pybaseball
+        run: pip install gspread google-auth requests pandas numpy scipy openpyxl pybaseball beautifulsoup4
 
       - name: Write credentials
         run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json

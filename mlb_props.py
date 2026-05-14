@@ -38,6 +38,25 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
+# Baseball Savant probable-pitcher matchup helpers (per-roster xBA, regression).
+# Imported here so build_rows can prefer the matchup-specific signal over the
+# season-level pybaseball pitcher xBA. Falls back gracefully when Savant is
+# blocked or the file isn't present (defensive import).
+try:
+    from fetchers.savant import (
+        load_savant_pitcher_data,
+        get_pitcher_vs_roster,
+        get_regression_factor,
+    )
+except Exception as _e:  # pragma: no cover — Savant is an optional signal
+    print(f"  ⚠️  fetchers.savant unavailable ({_e}) — matchup data disabled")
+    def load_savant_pitcher_data():  # type: ignore
+        return {}
+    def get_pitcher_vs_roster(pitcher_id, pitcher_name=""):  # type: ignore
+        return {}
+    def get_regression_factor(pitcher_data):  # type: ignore
+        return {"regression_factor": 1.00, "regression_label": ""}
+
 
 # ── CONFIG ─────────────────────────────────────────────────────
 HERE              = os.path.dirname(os.path.abspath(__file__))
@@ -87,11 +106,13 @@ HEADERS = [
     "Composite Score", "Rating",
     "Kelly Units", "MC Win%",
     "Data Source",
+    "Matchup PA", "Regression Label",
 ]
 
 BEST_HEADERS = [
     "Game Time", "Player", "Team", "Line", "Side",
     "Best Odds", "Best Book", "BPP Hit%", "Savant xBA", "Pitcher xBA",
+    "Matchup PA", "Regression Label",
     "Data Source",
     "Model Prob%", "Edge%",
     "Rating", "Composite Score",
@@ -753,8 +774,9 @@ def build_rows(props, bpp, pitchers, confirmed_map=None,
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
-    bs_ph_counter = Counter()
-    source_counter = Counter()  # rows per Data Source category
+    bs_ph_counter           = Counter()
+    source_counter          = Counter()  # rows per Data Source category
+    pitcher_source_counter  = Counter()  # rows per pitcher xBA source (matchup/season)
     stats_session = requests.Session()
     stats_cache   = {}
     stats_hits    = 0  # players with at least one BA component
@@ -799,17 +821,43 @@ def build_rows(props, bpp, pitchers, confirmed_map=None,
             data_source = "BPP fallback"
         source_counter[data_source] += 1
 
-        # Opposing-pitcher adjustment. Look up the BPP starter for the
-        # batter's Opponent team, then their Savant xBA-allowed. When
-        # available, blend at PITCHER_ADJUST weight; otherwise no-op.
-        opp_team    = (rec.get("opp") or "").upper()
-        pitcher_rec = pitchers.get(opp_team, {})
-        pitcher_pid = pitcher_rec.get("player_id", "")
-        pitcher_xba = savant_pitcher_xba.get(pitcher_pid) if pitcher_pid else None
+        # Opposing-pitcher adjustment. Two-tier source for xBA-allowed:
+        #   1. Savant probable-pitchers page → matchup-specific (vs THIS roster).
+        #      Used when the parsed matchup has PA >= 5 and a parsed xBA.
+        #   2. Pybaseball season xBA — fallback when matchup is missing/thin.
+        # Whichever is selected feeds the same PITCHER_ADJUST blend.
+        opp_team       = (rec.get("opp") or "").upper()
+        pitcher_rec    = pitchers.get(opp_team, {})
+        pitcher_pid    = pitcher_rec.get("player_id", "")
+        pitcher_name   = pitcher_rec.get("name", "")
+        pitcher_xba    = None
+        pitcher_source = ""   # "matchup" | "season" | ""
+        matchup_pa     = ""
+        regression_lbl = ""
+        matchup_data: dict = {}
+        if pitcher_pid:
+            try:
+                matchup_data = get_pitcher_vs_roster(int(pitcher_pid), pitcher_name) or {}
+            except (TypeError, ValueError):
+                matchup_data = {}
+            pa_val  = matchup_data.get("sv_vs_pa") or 0
+            xba_val = matchup_data.get("sv_vs_xba")
+            if pa_val >= 5 and xba_val is not None:
+                pitcher_xba    = xba_val
+                pitcher_source = "matchup"
+                matchup_pa     = pa_val
+                regression_lbl = get_regression_factor(matchup_data).get("regression_label", "")
+        if pitcher_xba is None and pitcher_pid:
+            season_xba = savant_pitcher_xba.get(pitcher_pid)
+            if season_xba is not None:
+                pitcher_xba    = season_xba
+                pitcher_source = "season"
+
         if pitcher_xba is not None:
             pitcher_phit = ba_to_hit_prob(pitcher_xba, rec["ab"])
             final_phit   = (1 - PITCHER_ADJUST) * batter_phit + PITCHER_ADJUST * pitcher_phit
             pitcher_used += 1
+            pitcher_source_counter[pitcher_source] += 1
         else:
             final_phit = batter_phit
 
@@ -864,7 +912,9 @@ def build_rows(props, bpp, pitchers, confirmed_map=None,
             kelly,                                        # 24 Kelly Units
             round(mc * 100, 2) if mc is not None else "", # 25 MC Win%
             data_source,                                  # 26 Data Source
-            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 27 Confirmed (extra)
+            matchup_pa,                                   # 27 Matchup PA
+            regression_lbl,                               # 28 Regression Label
+            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 29 Confirmed (extra)
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -879,8 +929,13 @@ def build_rows(props, bpp, pitchers, confirmed_map=None,
             f"MLB only: {source_counter['MLB only']}, "
             f"BPP fallback: {source_counter['BPP fallback']}"
         )
-    if savant_pitcher_xba:
-        print(f"  📊 Pitcher xBA adjustment applied to {pitcher_used} player-prop rows")
+    if pitcher_used:
+        m = pitcher_source_counter.get("matchup", 0)
+        s = pitcher_source_counter.get("season", 0)
+        print(
+            f"  📊 Pitcher xBA adjustment applied to {pitcher_used} rows "
+            f"(Savant matchup: {m}, pybaseball season: {s})"
+        )
     if bs_ph_counter:
         rr = bs_ph_counter.get(("R", "R"), 0)
         rl = bs_ph_counter.get(("R", "L"), 0)
@@ -949,7 +1004,8 @@ def build_best_bets(rows):
       1=Game Time, 2=Player, 3=Team, 5=Line, 6=Side,
       7=Bookmaker, 8=Odds, 10=BPP HitProb %, 16=Savant xBA, 17=Pitcher xBA,
       19=Model Prob %, 20=Edge %, 22=Composite, 23=Rating,
-      24=Kelly Units, 25=MC Win%, 26=Data Source, 27=Confirmed (extra)
+      24=Kelly Units, 25=MC Win%, 26=Data Source,
+      27=Matchup PA, 28=Regression Label, 29=Confirmed (extra)
     """
     by_player = {}
     for r in rows:
@@ -977,6 +1033,8 @@ def build_best_bets(rows):
             r[10],  # BPP Hit%
             r[16],  # Savant xBA
             r[17],  # Pitcher xBA
+            r[27],  # Matchup PA
+            r[28],  # Regression Label
             r[26],  # Data Source
             r[19],  # Model Prob%
             r[20],  # Edge%
@@ -984,12 +1042,13 @@ def build_best_bets(rows):
             r[22],  # Composite Score
             r[24],  # Kelly Units
             r[25],  # MC Win%
-            r[27] if len(r) > 27 else "",  # Confirmed
+            r[29] if len(r) > 29 else "",  # Confirmed
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological. Composite is at
-    # column 14 of the Best Bets row (BEST_HEADERS, after Data Source insert).
-    bests.sort(key=lambda b: (b[0], -b[14]))
+    # column 16 of the Best Bets row (BEST_HEADERS, after Matchup PA / Regression
+    # Label / Data Source).
+    bests.sort(key=lambda b: (b[0], -b[16]))
     return bests
 
 
@@ -1095,7 +1154,7 @@ def build_manual_tracker_rows(rows):
             r[25],  # MC Win%
             r[22],  # Composite Score
             r[23],  # Rating
-            r[27] if len(r) > 27 else "",  # Confirmed
+            r[29] if len(r) > 29 else "",  # Confirmed
             "",     # Result
             "",     # Notes
         ])
@@ -1132,7 +1191,7 @@ def write_today(sheet, rows):
     )
     if rows:
         end_row = 1 + len(rows)
-        # Rows may carry an extra trailing Confirmed column (r[27]) that
+        # Rows may carry an extra trailing Confirmed column (r[29]) that
         # Best Bets / 📊 Tracker read but Props Today does not. Slice to HEADERS.
         sliced = [r[:len(HEADERS)] for r in rows]
         print(f"  🔧 {TODAY_TAB}: writing {len(sliced)} rows → A2:{end_col}{end_row}")
@@ -1343,12 +1402,15 @@ def main():
         f"PENDING: {pending_count} | NO (excluded): {no_count}"
     )
 
-    # Baseball Savant xBA (batters) — feeds the 45/35/20 batter blend.
+    # Baseball Savant xBA (batters) — feeds the batter blend.
     # Pitcher xBA-allowed adjusts the final per-game prob (PITCHER_ADJUST=0.30).
-    # Both return {} on any failure so build_rows falls back per-player.
+    # build_rows prefers the per-roster matchup signal from the Savant probable-
+    # pitchers page (fetchers.savant); falls back to the pybaseball season xBA
+    # when matchup is missing or thin (PA < 5).
     season             = datetime.date.today().year
     savant_xba         = fetch_savant_xba(season)
     savant_pitcher_xba = fetch_savant_pitcher_xba(season)
+    load_savant_pitcher_data()  # pre-warm the probable-pitchers cache once
 
     props = get_batter_hits_props()
     rows  = build_rows(
