@@ -1575,12 +1575,17 @@ def write_manual_tracker(sheet, manual_rows):
 
     existing_keys = set()
     if None not in (date_idx, player_idx, line_idx, side_idx):
-        max_idx = max(date_idx, player_idx, line_idx, side_idx)
         for row in all_values[1:]:
-            if max_idx < len(row):
-                existing_keys.add(_dedup_key(
-                    row[date_idx], row[player_idx], row[line_idx], row[side_idx],
-                ))
+            # Bounds-safe per-cell read: gspread trims trailing empty cells,
+            # so a short existing row must still contribute its key — otherwise
+            # a matching new row slips past the check and gets appended as a
+            # duplicate.
+            existing_keys.add(_dedup_key(
+                row[date_idx]   if date_idx   < len(row) else "",
+                row[player_idx] if player_idx < len(row) else "",
+                row[line_idx]   if line_idx   < len(row) else "",
+                row[side_idx]   if side_idx   < len(row) else "",
+            ))
 
     # Filter to rows whose (Date, Player, Line, Side) isn't already logged.
     new_rows, skipped = [], 0
