@@ -52,9 +52,8 @@ BLEND_BA           = 0.45
 PITCHER_ADJUST     = 0.40
 PITCHER_MATCHUP_PA = 25
 TODAY_TAB          = "Props Today"
-TRACKER_TAB        = "Props Tracker"
 BEST_TAB           = "🎯 Best Bets"
-MANUAL_TRACKER_TAB = "📊 Tracker"
+MANUAL_TRACKER_TAB = "📊 Tracker"  # populated by props_scorer.py only — model never writes here
 
 # Full scouting card dump — every signal the model uses, visible in one row.
 # Groups: Identity | Prop | Batter Statcast | BA Splits | Pitcher Matchup |
@@ -127,22 +126,6 @@ BEST_HEADERS = [
     "Result", "Notes",
 ]
 
-TRACKER_HEADERS = [
-    "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
-    "BPP Hit%", "Model Prob%", "Edge%",
-    "Composite Score", "Rating",
-    "Kelly Units", "MC Win%",
-    "Result", "Notes",
-]
-
-MANUAL_TRACKER_HEADERS = [
-    "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
-    "BPP Hit%", "Model Prob%", "Edge%",
-    "Kelly Units", "MC Win%",
-    "Composite Score", "Rating",
-    "Confirmed",
-    "Result", "Notes",
-]
 
 
 def format_game_time(iso_str: str) -> str:
@@ -902,64 +885,9 @@ def write_best_bets(sheet, best_rows):
     print(f"  ✅ {BEST_TAB}: {len(deduped)} rows written (Confirmed=YES only)")
 
 
-# ── PROPS TRACKER ──────────────────────────────────────────────
-def build_tracker_rows(rows):
-    by_key = {}
-    for r in rows:
-        if r[36] not in ("ELITE","STRONG"): continue  # Rating
-        key = (r[0], r[2], r[8])                      # Date, Player, Line
-        if key not in by_key or r[33] > by_key[key][33]: by_key[key] = r  # Edge%
-    out = []
-    for r in by_key.values():
-        out.append([
-            r[0],  # Date
-            r[1],  # Game Time
-            r[2],  # Player
-            r[3],  # Team
-            r[7],  # Game
-            r[8],  # Line
-            r[9],  # Side
-            r[22], # BPP HitProb%
-            r[32], # Model Prob%
-            r[33], # Edge%
-            r[35], # Composite Score
-            r[36], # Rating
-            r[37], # Kelly Units
-            r[38], # MC Win%
-            "", "", # Result, Notes
-        ])
-    return out
-
-def build_manual_tracker_rows(rows):
-    by_player = {}
-    for r in rows:
-        if r[36] not in ("ELITE","STRONG"): continue              # Rating
-        if not isinstance(r[37],(int,float)) or r[37] <= 0: continue  # Kelly
-        if not isinstance(r[33],(int,float)) or r[33] <= 0: continue  # Edge%
-        key = r[2]
-        if key not in by_player or r[33] > by_player[key][33]: by_player[key] = r
-    out = []
-    for r in by_player.values():
-        out.append([
-            r[0],   # Date
-            r[1],   # Game Time
-            r[2],   # Player
-            r[3],   # Team
-            r[7],   # Game
-            r[8],   # Line
-            r[9],   # Side
-            r[22],  # BPP Hit%
-            r[32],  # Model Prob%
-            r[33],  # Edge%
-            r[37],  # Kelly Units
-            r[38],  # MC Win%
-            r[35],  # Composite Score
-            r[36],  # Rating
-            r[41] if len(r) > 41 else "",  # Confirmed
-            "",     # Result
-            "",     # Notes
-        ])
-    return out
+# ── PROPS TRACKER REMOVED ──────────────────────────────────────
+# Props Tracker tab deleted. 📊 Tracker is populated by props_scorer.py
+# only — reading from Best Bets and writing W/L results back to Tracker.
 
 
 # ── SHEET UTILITIES ────────────────────────────────────────────
@@ -973,11 +901,6 @@ def _col_letter(n: int) -> str:
     while n > 0:
         n, r = divmod(n - 1, 26); s = chr(65 + r) + s
     return s
-
-def _row_edge(row, edge_idx) -> float:
-    if edge_idx is None or edge_idx >= len(row): return -float("inf")
-    try: return float(row[edge_idx])
-    except (TypeError, ValueError): return -float("inf")
 
 
 def write_today(sheet, rows):
@@ -1001,122 +924,6 @@ def write_today(sheet, rows):
         sliced = [r[:len(HEADERS)] for r in deduped]
         ws.update(range_name=f"A2:{end_col}{1+len(sliced)}", values=sliced, value_input_option="USER_ENTERED")
     print(f"  ✅ {TODAY_TAB}: header + {len(deduped)} rows")
-
-
-def append_tracker(sheet, tracker_rows):
-    n_cols = len(TRACKER_HEADERS); end_col = _col_letter(n_cols)
-    try:
-        ws = sheet.worksheet(TRACKER_TAB); first_row = ws.row_values(1)
-    except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=TRACKER_TAB, rows=10000, cols=max(30,n_cols))
-        ws.update(range_name=f"A1:{end_col}1", values=[TRACKER_HEADERS], value_input_option="USER_ENTERED")
-        first_row = list(TRACKER_HEADERS)
-    if not first_row:
-        ws.update(range_name=f"A1:{end_col}1", values=[TRACKER_HEADERS], value_input_option="USER_ENTERED")
-        first_row = list(TRACKER_HEADERS)
-    else:
-        missing = [c for c in TRACKER_HEADERS if c not in set(first_row)]
-        if missing:
-            start_col = _col_letter(len(first_row)+1); new_end = _col_letter(len(first_row)+len(missing))
-            ws.update(range_name=f"{start_col}1:{new_end}1", values=[missing], value_input_option="USER_ENTERED")
-            first_row = first_row + missing
-    if not tracker_rows: print(f"  ⚠️  {TRACKER_TAB}: no rows to append"); return
-    aligned = []
-    for row in tracker_rows:
-        d = dict(zip(TRACKER_HEADERS, row)); aligned.append([d.get(col,"") for col in first_row])
-    ws.append_rows(aligned, value_input_option="USER_ENTERED")
-    print(f"  ✅ {TRACKER_TAB}: appended {len(aligned)} rows")
-
-
-def _cleanup_manual_tracker_duplicates(sheet, ws, all_values, first_row):
-    try:
-        date_idx   = first_row.index("Date");   player_idx = first_row.index("Player")
-        line_idx   = first_row.index("Line");   side_idx   = first_row.index("Side")
-    except ValueError: return all_values
-    edge_idx   = first_row.index("Edge%")  if "Edge%"  in first_row else None
-    result_idx = first_row.index("Result") if "Result" in first_row else None
-    notes_idx  = first_row.index("Notes")  if "Notes"  in first_row else None
-    if edge_idx is None: return all_values
-    key_max_idx = max(date_idx, player_idx, line_idx, side_idx, edge_idx)
-    groups: dict = {}
-    for i, row in enumerate(all_values[1:], start=2):
-        if key_max_idx >= len(row): continue
-        groups.setdefault(_dedup_key(row[date_idx],row[player_idx],row[line_idx],row[side_idx]),
-                          []).append((i, list(row), _row_edge(row, edge_idx)))
-    cell_updates = []; rows_to_delete = []
-    for key, members in groups.items():
-        if len(members) < 2: continue
-        winner = max(members, key=lambda m: (m[2], m[0]))
-        winner_idx, winner_row, _ = winner
-        losers = [m for m in members if m[0] != winner_idx]
-        for col_idx in (result_idx, notes_idx):
-            if col_idx is None: continue
-            winner_val = winner_row[col_idx] if col_idx < len(winner_row) else ""
-            if winner_val.strip(): continue
-            for _, lr, _ in losers:
-                if col_idx < len(lr) and lr[col_idx].strip():
-                    cell_updates.append({"range": f"{_col_letter(col_idx+1)}{winner_idx}", "values": [[lr[col_idx]]]}); break
-        rows_to_delete.extend(m[0] for m in losers)
-    if not rows_to_delete: return all_values
-    if cell_updates:
-        ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
-        print(f"  🔄 {MANUAL_TRACKER_TAB}: promoted {len(cell_updates)} Result/Notes cell(s)")
-    rows_to_delete.sort(reverse=True)
-    try: sheet_id = ws.id
-    except AttributeError: sheet_id = ws._properties.get("sheetId")
-    sheet.batch_update({"requests": [{"deleteDimension":{"range":{"sheetId":sheet_id,"dimension":"ROWS","startIndex":ri-1,"endIndex":ri}}} for ri in rows_to_delete]})
-    print(f"  🧹 {MANUAL_TRACKER_TAB}: deleted {len(rows_to_delete)} duplicate row(s)")
-    return ws.get_all_values()
-
-
-def write_manual_tracker(sheet, manual_rows):
-    n_cols = len(MANUAL_TRACKER_HEADERS); end_col = _col_letter(n_cols)
-    try:
-        ws = sheet.worksheet(MANUAL_TRACKER_TAB); all_values = ws.get_all_values()
-        first_row = all_values[0] if all_values else []
-    except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=MANUAL_TRACKER_TAB, rows=10000, cols=max(30,n_cols))
-        ws.update(range_name=f"A1:{end_col}1", values=[MANUAL_TRACKER_HEADERS], value_input_option="USER_ENTERED")
-        first_row = list(MANUAL_TRACKER_HEADERS); all_values = [first_row]
-    if not first_row:
-        ws.update(range_name=f"A1:{end_col}1", values=[MANUAL_TRACKER_HEADERS], value_input_option="USER_ENTERED")
-        first_row = list(MANUAL_TRACKER_HEADERS); all_values = [first_row]
-    else:
-        missing = [c for c in MANUAL_TRACKER_HEADERS if c not in set(first_row)]
-        if missing:
-            start_col = _col_letter(len(first_row)+1); new_end = _col_letter(len(first_row)+len(missing))
-            ws.update(range_name=f"{start_col}1:{new_end}1", values=[missing], value_input_option="USER_ENTERED")
-            first_row = first_row + missing
-    all_values = _cleanup_manual_tracker_duplicates(sheet, ws, all_values, first_row)
-    if not manual_rows: print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 candidate rows"); return
-    try:
-        date_idx=first_row.index("Date"); player_idx=first_row.index("Player")
-        line_idx=first_row.index("Line"); side_idx=first_row.index("Side")
-    except ValueError as exc:
-        print(f"  ⚠️  {MANUAL_TRACKER_TAB}: missing key column ({exc}); skipping dedup")
-        date_idx=player_idx=line_idx=side_idx=None
-    existing_keys = set()
-    if None not in (date_idx,player_idx,line_idx,side_idx):
-        for row in all_values[1:]:
-            existing_keys.add(_dedup_key(
-                row[date_idx]   if date_idx   < len(row) else "",
-                row[player_idx] if player_idx < len(row) else "",
-                row[line_idx]   if line_idx   < len(row) else "",
-                row[side_idx]   if side_idx   < len(row) else "",
-            ))
-    new_rows, skipped = [], 0
-    for row in manual_rows:
-        d   = dict(zip(MANUAL_TRACKER_HEADERS, row))
-        key = _dedup_key(d.get("Date",""),d.get("Player",""),d.get("Line",""),d.get("Side",""))
-        if key in existing_keys: skipped += 1; continue
-        existing_keys.add(key); new_rows.append(row)
-    if not new_rows:
-        print(f"  ⚠️  {MANUAL_TRACKER_TAB}: 0 new rows ({skipped} already logged)"); return
-    aligned = []
-    for row in new_rows:
-        d = dict(zip(MANUAL_TRACKER_HEADERS, row)); aligned.append([d.get(col,"") for col in first_row])
-    ws.append_rows(aligned, value_input_option="USER_ENTERED")
-    print(f"  ✅ {MANUAL_TRACKER_TAB}: appended {len(aligned)} row(s) ({skipped} skipped as dupes)")
 
 
 # ── MAIN ───────────────────────────────────────────────────────
@@ -1146,16 +953,12 @@ def main():
                        savant_xba=savant_xba, savant_statcast=savant_statcast,
                        team_runs=team_runs)
 
-    rated        = [r for r in rows if r[36] in ("ELITE","STRONG","LEAN")]
-    bests        = build_best_bets(rated)
-    tracker_rows = build_tracker_rows(rows)
-    manual_rows  = build_manual_tracker_rows(rows)
+    rated  = [r for r in rows if r[36] in ("ELITE","STRONG","LEAN")]
+    bests  = build_best_bets(rated)
 
     sheet = get_sheet()
     write_today(sheet, rated)
-    append_tracker(sheet, tracker_rows)
     write_best_bets(sheet, bests)
-    write_manual_tracker(sheet, manual_rows)
 
     edges  = sum(1 for r in rows if r[34])             # Edge Flag index
     elite  = sum(1 for r in rated if r[36] == "ELITE")
@@ -1166,7 +969,7 @@ def main():
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
         f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
         f"Best Bets: {len(bests)} (Confirmed=YES only) | "
-        f"Props Tracker append: {len(tracker_rows)}"
+        f"📊 Tracker populated by props_scorer.py only"
     )
 
 
