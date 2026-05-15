@@ -1017,7 +1017,16 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None):
         for r in out:
             hit_pr  = 100.0 * bisect_right(sorted_hit,  r[10]) / n
             edge_pr = 100.0 * bisect_right(sorted_edge, r[20]) / n
-            r[22]   = round(composite_score(hit_pr, edge_pr), 2)
+            base    = composite_score(hit_pr, edge_pr)
+            # Week-1 calibration boosts (r[5] = Line, r[6] = Side).
+            adj = 0
+            if r[6] == "Under":
+                adj += 10
+            if r[5] == 1.5:
+                adj += 5
+            if r[6] == "Over" and r[5] == 0.5:
+                adj -= 5
+            r[22]   = round(min(100.0, base + adj), 2)
 
     # Assign ratings by RANK in today's composite-score distribution.
     # ELITE = top 10%, STRONG = next 15% (10–25%), LEAN = next 35% (25–60%),
