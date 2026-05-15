@@ -123,6 +123,7 @@ BEST_HEADERS = [
     "Game Time", "Player", "Team", "Game", "Line", "Side",
     "Best Odds", "Best Book",
     "Composite Score", "Rating", "Edge%", "Kelly Units",
+    "Model Prob%", "MC Win%",
     "Result", "Notes",
 ]
 
@@ -811,7 +812,8 @@ def build_best_bets(rows):
     BEST_HEADERS indices:
       0=Game Time  1=Player  2=Team  3=Game  4=Line  5=Side
       6=Best Odds  7=Best Book  8=Composite Score  9=Rating
-      10=Edge%  11=Kelly Units  12=Result(blank)  13=Notes(blank)
+      10=Edge%  11=Kelly Units  12=Model Prob%  13=MC Win%
+      14=Result(blank)  15=Notes(blank)
     """
     by_player = {}
     for r in rows:
@@ -842,8 +844,10 @@ def build_best_bets(rows):
             r[36],  # 9  Rating
             r[33],  # 10 Edge%
             r[37],  # 11 Kelly Units
-            "",     # 12 Result (manual fill after game)
-            "",     # 13 Notes  (manual fill after game)
+            r[32],  # 12 Model Prob%
+            r[38],  # 13 MC Win%
+            "",     # 14 Result (manual fill after game)
+            "",     # 15 Notes  (manual fill after game)
         ])
 
     # Game Time ASC, Composite Score DESC (index 8)
