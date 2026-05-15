@@ -50,6 +50,7 @@ GSHEET_CRED_ENV  = os.environ.get("GSHEET_CREDENTIALS", "")
 
 MLB_STATS_BASE     = "https://statsapi.mlb.com/api/v1"
 MANUAL_TRACKER_TAB = "📊 Tracker"
+BEST_BETS_TAB      = "🎯 Best Bets"
 
 # Header used when creating the tab from scratch.
 # Must match what Best Bets rows contain so W/L scoring aligns correctly.
@@ -177,6 +178,125 @@ def _get_or_create_tracker(sheet):
         )
         print(f"  ✅ {MANUAL_TRACKER_TAB}: created with header")
         return ws
+
+
+# ── SYNC BEST BETS → TRACKER ──────────────────────────────────
+def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
+    """Read today's rows from 🎯 Best Bets and append any not already in
+    📊 Tracker. Never deletes or overwrites existing Tracker rows.
+    Deduped by (Date, Player, Line, Side) so re-runs never create duplicates.
+
+    Best Bets columns (no Date):
+      0=Game Time  1=Player  2=Team  3=Game  4=Line  5=Side
+      6=Best Odds  7=Best Book  8=Composite Score  9=Rating
+      10=Edge%  11=Kelly Units  12=Result  13=Notes
+
+    Tracker columns (with Date prepended):
+      Date, Game Time, Player, Team, Game, Line, Side,
+      Composite Score, Rating, Edge%, Kelly Units,
+      Confirmed, Result, Notes
+    """
+    # Read Best Bets
+    try:
+        bb_ws = sheet.worksheet(BEST_BETS_TAB)
+        bb_values = bb_ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        print(f"  ⚠️  {BEST_BETS_TAB} tab not found — skipping sync")
+        return
+    if len(bb_values) <= 1:
+        print(f"  ⚠️  {BEST_BETS_TAB} has no data rows — skipping sync")
+        return
+
+    # Read existing Tracker rows to build dedup key set
+    tracker_values = tracker_ws.get_all_values()
+    tracker_header = tracker_values[0] if tracker_values else MANUAL_TRACKER_HEADERS
+
+    try:
+        t_date_idx   = tracker_header.index("Date")
+        t_player_idx = tracker_header.index("Player")
+        t_line_idx   = tracker_header.index("Line")
+        t_side_idx   = tracker_header.index("Side")
+    except ValueError as e:
+        print(f"  ⚠️  Tracker missing key column ({e}) — skipping sync")
+        return
+
+    existing_keys = set()
+    for row in tracker_values[1:]:
+        if max(t_date_idx, t_player_idx, t_line_idx, t_side_idx) >= len(row):
+            continue
+        existing_keys.add(_dedup_key(
+            row[t_date_idx], row[t_player_idx],
+            row[t_line_idx], row[t_side_idx],
+        ))
+
+    # Map Best Bets columns
+    bb_header = bb_values[0]
+    try:
+        bb_player_idx    = bb_header.index("Player")
+        bb_gametime_idx  = bb_header.index("Game Time")
+        bb_team_idx      = bb_header.index("Team")
+        bb_game_idx      = bb_header.index("Game")
+        bb_line_idx      = bb_header.index("Line")
+        bb_side_idx      = bb_header.index("Side")
+        bb_composite_idx = bb_header.index("Composite Score")
+        bb_rating_idx    = bb_header.index("Rating")
+        bb_edge_idx      = bb_header.index("Edge%")
+        bb_kelly_idx     = bb_header.index("Kelly Units")
+    except ValueError as e:
+        print(f"  ⚠️  Best Bets missing column ({e}) — skipping sync")
+        return
+
+    new_rows = []
+    for row in bb_values[1:]:
+        if max(bb_player_idx, bb_line_idx, bb_side_idx) >= len(row):
+            continue
+        key = _dedup_key(
+            today_str,
+            row[bb_player_idx],
+            row[bb_line_idx],
+            row[bb_side_idx],
+        )
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+
+        def _safe(idx):
+            return row[idx] if idx < len(row) else ""
+
+        new_rows.append([
+            today_str,                      # Date
+            _safe(bb_gametime_idx),         # Game Time
+            _safe(bb_player_idx),           # Player
+            _safe(bb_team_idx),             # Team
+            _safe(bb_game_idx),             # Game
+            _safe(bb_line_idx),             # Line
+            _safe(bb_side_idx),             # Side
+            _safe(bb_composite_idx),        # Composite Score
+            _safe(bb_rating_idx),           # Rating
+            _safe(bb_edge_idx),             # Edge%
+            _safe(bb_kelly_idx),            # Kelly Units
+            "YES",                          # Confirmed (Best Bets only has YES rows)
+            "",                             # Result (blank — scored after game)
+            "",                             # Notes
+        ])
+
+    if not new_rows:
+        print(f"  ✅ {BEST_BETS_TAB} → {MANUAL_TRACKER_TAB}: 0 new rows (all already synced)")
+        return
+
+    # Align to tracker column order before appending
+    col_map = {
+        "Date": 0, "Game Time": 1, "Player": 2, "Team": 3, "Game": 4,
+        "Line": 5, "Side": 6, "Composite Score": 7, "Rating": 8,
+        "Edge%": 9, "Kelly Units": 10, "Confirmed": 11, "Result": 12, "Notes": 13,
+    }
+    aligned = []
+    for row in new_rows:
+        aligned.append([row[col_map.get(col, 99)] if col_map.get(col, 99) < len(row) else ""
+                        for col in tracker_header])
+
+    tracker_ws.append_rows(aligned, value_input_option="USER_ENTERED")
+    print(f"  ✅ {BEST_BETS_TAB} → {MANUAL_TRACKER_TAB}: synced {len(new_rows)} new row(s)")
 
 
 # ── BPP PLAYER-ID MAP ──────────────────────────────────────────
@@ -406,6 +526,9 @@ def main(argv=None):
 
     # Create tab with header if it was accidentally deleted or never existed
     ws = _get_or_create_tracker(sheet)
+
+    # Sync today's Best Bets rows into Tracker (append-only, no duplicates)
+    sync_best_bets_to_tracker(sheet, ws, target_dates[0] if len(target_dates) == 1 else today_et())
 
     all_values = ws.get_all_values()
     if not all_values or all_values == [MANUAL_TRACKER_HEADERS]:
