@@ -772,20 +772,17 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None,
         print(f"  📊 Matchup: R vs R:{rr} R vs L:{rl} L vs R:{lr} L vs L:{ll} S:{s_count}")
 
     # Composite percentile ranks
-    # BPP HitProb% = r[22], Edge% = r[33], Composite = r[35], Side = r[9], Line = r[8]
+    # Model Prob% = r[32], Edge% = r[33], Composite = r[35]
+    # 60% model prob (fully blended: xBA + Weighted BA + pitcher adj + run filter)
+    # 40% edge% — both ranked against today's pool
     if out:
-        sorted_hit  = sorted(r[22] for r in out)
-        sorted_edge = sorted(r[33] for r in out)
+        sorted_model = sorted(r[32] for r in out)
+        sorted_edge  = sorted(r[33] for r in out)
         n = len(out)
         for r in out:
-            hit_pr  = 100.0 * bisect_right(sorted_hit,  r[22]) / n
-            edge_pr = 100.0 * bisect_right(sorted_edge, r[33]) / n
-            base    = composite_score(hit_pr, edge_pr)
-            adj = 0
-            if r[9] == "Under": adj += 10
-            if r[8] == 1.5:     adj += 5
-            if r[9] == "Over" and r[8] == 0.5: adj -= 5
-            r[35] = round(min(100.0, base + adj), 2)
+            model_pr = 100.0 * bisect_right(sorted_model, r[32]) / n
+            edge_pr  = 100.0 * bisect_right(sorted_edge,  r[33]) / n
+            r[35]    = round(composite_score(model_pr, edge_pr), 2)
 
     # Assign ratings by rank — Rating = r[36]
     if out:
