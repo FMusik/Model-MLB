@@ -59,6 +59,7 @@ except Exception as _e:  # pragma: no cover — Savant is an optional signal
 HERE              = os.path.dirname(os.path.abspath(__file__))
 BATTERS_FILE      = os.path.join(HERE, "ballparkpal_batters.xlsx")
 PITCHERS_FILE     = os.path.join(HERE, "ballparkpal_pitchers.xlsx")
+TEAMS_FILE        = os.path.join(HERE, "ballparkpal_teams.xlsx")
 
 ODDS_API_KEY      = os.environ.get("ODDS_API_KEY", "")
 PROPS_SHEET_ID    = os.environ.get("PROPS_SHEET_ID", "")
@@ -109,6 +110,7 @@ HEADERS = [
     "Kelly Units", "MC Win%",
     "Data Source",
     "P Sample PA", "P K%",
+    "Team Proj Runs",
 ]
 
 BEST_HEADERS = [
@@ -120,6 +122,7 @@ BEST_HEADERS = [
     "Rating", "Composite Score",
     "Kelly Units", "MC Win%",
     "Confirmed",
+    "Team Proj Runs",
 ]
 
 TRACKER_HEADERS = [
@@ -383,6 +386,41 @@ def load_bpp_pitchers() -> dict:
     print(f"  ✅ BPP pitchers loaded: {len(out)} teams ({rate_count} with season hits-allowed rate)")
     sample = [(t, v["hand"], v["player_id"], v["name"]) for t, v in list(out.items())[:5]]
     print(f"  🔧 First 5 pitcher entries (team, hand, pid, name): {sample}")
+    return out
+
+
+def load_bpp_teams() -> dict:
+    """team_abbr → projected runs for today's game, from ballparkpal_teams.xlsx.
+
+    The teams export has one row per team per game with a 'Runs' column
+    (BallparkPal's projected run total). Used by build_rows to suppress a
+    batter's hit probability when their team is in a low-run environment.
+    Returns {} silently if the file or required columns are missing.
+    """
+    if not os.path.exists(TEAMS_FILE):
+        print(f"  ⚠️  {TEAMS_FILE} not found — team run total filter disabled")
+        return {}
+    df = pd.read_excel(TEAMS_FILE, engine="openpyxl")
+    cols = {c.lower(): c for c in df.columns}
+    team_col = cols.get("team")
+    runs_col = cols.get("runs") or cols.get("projectedruns") or cols.get("runtotal")
+    if not (team_col and runs_col):
+        print(f"  ⚠️  teams file missing Team/Runs columns. Have: {list(df.columns)}")
+        return {}
+
+    out = {}
+    for _, row in df.iterrows():
+        team = str(row[team_col]).strip().upper()
+        if not team or team in out:
+            continue  # first row per team
+        try:
+            runs = float(row[runs_col])
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(runs):
+            continue
+        out[team] = round(runs, 2)
+    print(f"  ✅ BPP teams loaded: {len(out)} teams with projected runs")
     return out
 
 
@@ -793,11 +831,12 @@ def match_player(prop_name: str, bpp: dict):
 
 
 # ── BUILD ROWS ─────────────────────────────────────────────────
-def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None):
+def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None,
+                team_runs=None):
     """Build per-prop rows.
 
     confirmed_map (normalized BPP name → 'YES'/'PENDING') is stashed as an
-    extra column at index 29 — Best Bets and 📊 Tracker pick it up;
+    extra column at index 30 — Best Bets and 📊 Tracker pick it up;
     HEADERS-based writers (Props Today, Props Tracker) slice it off.
 
     savant_xba (mlbam_id → est_ba) feeds the batter blend. Per-player
@@ -813,10 +852,14 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None):
       - else the BPP file's season hits-allowed rate.
         final_phit = (1 - PITCHER_ADJUST) * batter_blend + PITCHER_ADJUST * combined
       Skipped (per-row) only when neither source is available.
+
+    team_runs (team_abbr → projected runs) applies a tiered multiplier to the
+    batter blend: < 2.5 proj runs → x0.75, < 3.5 → x0.85.
     """
     confirmed_map      = confirmed_map or {}
     savant_xba         = savant_xba or {}
     pitchers           = pitchers or {}
+    team_runs          = team_runs or {}
     today = datetime.date.today().isoformat()
     out = []
     misses = 0
@@ -866,6 +909,15 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None):
             batter_phit = rec["p_hit"]
             data_source = "BPP fallback"
         source_counter[data_source] += 1
+
+        # Team run-total filter: a low projected-run environment suppresses
+        # the batter's hit chances. Tiered multiplier on the batter blend.
+        team_proj_runs = team_runs.get((rec.get("team") or "").upper())
+        if team_proj_runs is not None:
+            if team_proj_runs < 2.5:
+                batter_phit *= 0.75
+            elif team_proj_runs < 3.5:
+                batter_phit *= 0.85
 
         # Opposing-pitcher adjustment. Primary source is the Savant
         # probable-pitcher matchup (xBA-allowed + K% vs THIS roster); when
@@ -972,7 +1024,8 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None):
             data_source,                                  # 26 Data Source
             p_sample_pa,                                  # 27 P Sample PA
             p_k_pct,                                      # 28 P K%
-            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 29 Confirmed (extra)
+            team_proj_runs if team_proj_runs is not None else "",  # 29 Team Proj Runs
+            confirmed_map.get(normalize_name(rec.get("name", "")), ""),  # 30 Confirmed (extra)
         ])
     if misses:
         print(f"   ⚠️  {misses} prop quotes had no BPP match")
@@ -1072,7 +1125,7 @@ def build_best_bets(rows):
       7=Bookmaker, 8=Odds, 10=BPP HitProb %, 16=Savant xBA, 17=P xBA vs Roster,
       19=Model Prob %, 20=Edge %, 22=Composite, 23=Rating,
       24=Kelly Units, 25=MC Win%, 26=Data Source,
-      27=P Sample PA, 28=P K%, 29=Confirmed (extra)
+      27=P Sample PA, 28=P K%, 29=Team Proj Runs, 30=Confirmed (extra)
     """
     by_player = {}
     for r in rows:
@@ -1109,7 +1162,8 @@ def build_best_bets(rows):
             r[22],  # Composite Score
             r[24],  # Kelly Units
             r[25],  # MC Win%
-            r[29] if len(r) > 29 else "",  # Confirmed
+            r[30] if len(r) > 30 else "",  # Confirmed
+            r[29] if len(r) > 29 else "",  # Team Proj Runs
         ])
     # Sort: Game Time ASC, then Composite Score DESC. Game Time is "HH:MM"
     # (24-hour ET) so lexicographic sort is chronological. Composite is at
@@ -1250,7 +1304,7 @@ def build_manual_tracker_rows(rows):
             r[25],  # MC Win%
             r[22],  # Composite Score
             r[23],  # Rating
-            r[29] if len(r) > 29 else "",  # Confirmed
+            r[30] if len(r) > 30 else "",  # Confirmed
             "",     # Result
             "",     # Notes
         ])
@@ -1318,7 +1372,7 @@ def write_today(sheet, rows):
 
     if deduped:
         end_row = 1 + len(deduped)
-        # Rows may carry an extra trailing Confirmed column (r[29]) that
+        # Rows may carry an extra trailing Confirmed column (r[30]) that
         # Best Bets / 📊 Tracker read but Props Today does not. Slice to HEADERS.
         sliced = [r[:len(HEADERS)] for r in deduped]
         print(f"  🔧 {TODAY_TAB}: writing {len(sliced)} rows → A2:{end_col}{end_row}")
@@ -1666,11 +1720,15 @@ def main():
     savant_xba = fetch_savant_xba(season)
     load_savant_pitcher_data()  # pre-warm the probable-pitchers cache once
 
+    # Team projected runs — low-run environments suppress batter hit prob.
+    team_runs = load_bpp_teams()
+
     props = get_batter_hits_props()
     rows  = build_rows(
         props, bpp, pitchers,
         confirmed_map=confirmed_map,
         savant_xba=savant_xba,
+        team_runs=team_runs,
     )
 
     # Per-tab views drawn from the same row pool. Row indices:
