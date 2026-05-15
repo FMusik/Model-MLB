@@ -567,52 +567,50 @@ def main(argv=None):
             print(f"  ✅ {target_date} {player}: {side} {line} | hits={hits} → {result}")
             continue
 
-        # 2. Game-log entry exists but AB == 0 — the player was on the roster
-        #    and genuinely did not bat. This is the ONLY DNP path that applies
-        #    to Confirmed=YES (per the "genuinely 0 AB" rule).
-        if entry is not None and entry[1] == 0:
-            updates.append({"range": f"{result_col}{sheet_row}", "values": [["DNP"]]})
-            dnp_count += 1
-            print(f"  ⏸️  {target_date} {player}: AB=0 in game log → DNP")
-            continue
-
-        # 3. No game-log entry at all. Decide via team game status + Confirmed.
+        # Team game status — needed to tell a confirmed-final game from one
+        # still in progress, and to decide DNP vs retry.
         player_team = info.get("team", "")
         team_status = ""
         if player_team:
             statuses    = fetch_team_game_statuses(target_date, session, status_cache)
             team_status = statuses.get(player_team, "")
+        game_final = team_status == "Final"
 
+        # 2. Game-log entry exists but AB == 0 — the player was on the roster
+        #    and did not bat. For Confirmed=YES this is only a DNP once the
+        #    game is confirmed final; while it's still live they may yet bat.
+        if entry is not None and entry[1] == 0:
+            if confirmed == "YES" and not game_final:
+                no_data += 1
+                continue
+            updates.append({"range": f"{result_col}{sheet_row}", "values": [["DNP"]]})
+            dnp_count += 1
+            print(f"  ⏸️  {target_date} {player}: AB=0 in game log → DNP")
+            continue
+
+        # 3. No game-log entry at all.
         # Game still in progress / not started — leave blank, retry next run.
         if team_status in ("Live", "Preview"):
             no_data += 1
             continue
 
-        # Team had no game, or it was postponed/cancelled → DNP (didn't play).
-        if player_team and team_status in ("", "Postponed"):
-            updates.append({"range": f"{result_col}{sheet_row}", "values": [["DNP"]]})
-            dnp_count += 1
-            reason = "team had no game" if team_status == "" else "game postponed"
-            print(f"  ⏸️  {target_date} {player}: {reason} → DNP")
-            continue
-
-        # Team played (Final) but no game-log entry for this player.
+        # Confirmed=YES with no game log — final, postponed, or no game — is
+        # never a DNP: the lineup said they were playing, so a missing log is
+        # a stale/mismatched lookup. Mark PENDING for retry / manual review.
         if confirmed == "YES":
-            # The player WAS in the posted lineup, so a missing game log is
-            # almost certainly an id mismatch or a lagging stats feed — never
-            # contradict it with DNP. Mark PENDING; PENDING rows are retried.
             updates.append({"range": f"{result_col}{sheet_row}", "values": [["PENDING"]]})
             pending_count += 1
-            print(f"  ⏳ {target_date} {player}: Confirmed=YES, no game log yet → PENDING (retry)")
+            print(f"  ⏳ {target_date} {player}: Confirmed=YES, no game log → PENDING")
             continue
 
-        # Confirmed PENDING / NO / blank + no game log + team played → DNP.
+        # Confirmed NO / PENDING / blank + no game activity → DNP.
         updates.append({"range": f"{result_col}{sheet_row}", "values": [["DNP"]]})
         dnp_count += 1
-        print(
-            f"  ⏸️  {target_date} {player}: Confirmed={confirmed or 'blank'}, "
-            f"no game log → DNP"
-        )
+        if player_team and team_status in ("", "Postponed"):
+            reason = "team had no game" if team_status == "" else "game postponed"
+        else:
+            reason = f"Confirmed={confirmed or 'blank'}, no game log"
+        print(f"  ⏸️  {target_date} {player}: {reason} → DNP")
 
     if updates:
         ws.batch_update(updates, value_input_option="USER_ENTERED")
