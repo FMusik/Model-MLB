@@ -56,9 +56,8 @@ BEST_BETS_TAB      = "🎯 Best Bets"
 # Must match what Best Bets rows contain so W/L scoring aligns correctly.
 MANUAL_TRACKER_HEADERS = [
     "Date", "Game Time", "Player", "Team", "Game", "Line", "Side",
-    "BPP Hit%", "Model Prob%", "Edge%",
-    "Kelly Units", "MC Win%",
-    "Composite Score", "Rating",
+    "Composite Score", "Rating", "Edge%", "Kelly Units",
+    "Model Prob%", "MC Win%",
     "Confirmed",
     "Result", "Notes",
 ]
@@ -242,6 +241,8 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
         bb_rating_idx    = bb_header.index("Rating")
         bb_edge_idx      = bb_header.index("Edge%")
         bb_kelly_idx     = bb_header.index("Kelly Units")
+        bb_model_idx     = bb_header.index("Model Prob%")
+        bb_mc_idx        = bb_header.index("MC Win%")
     except ValueError as e:
         print(f"  ⚠️  Best Bets missing column ({e}) — skipping sync")
         return
@@ -275,8 +276,10 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
             _safe(bb_rating_idx),           # Rating
             _safe(bb_edge_idx),             # Edge%
             _safe(bb_kelly_idx),            # Kelly Units
-            "YES",                          # Confirmed (Best Bets only has YES rows)
-            "",                             # Result (blank — scored after game)
+            _safe(bb_model_idx),            # Model Prob%
+            _safe(bb_mc_idx),               # MC Win%
+            "YES",                          # Confirmed
+            "",                             # Result
             "",                             # Notes
         ])
 
@@ -287,8 +290,10 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
     # Align to tracker column order before appending
     col_map = {
         "Date": 0, "Game Time": 1, "Player": 2, "Team": 3, "Game": 4,
-        "Line": 5, "Side": 6, "Composite Score": 7, "Rating": 8,
-        "Edge%": 9, "Kelly Units": 10, "Confirmed": 11, "Result": 12, "Notes": 13,
+        "Line": 5, "Side": 6,
+        "Composite Score": 7, "Rating": 8, "Edge%": 9, "Kelly Units": 10,
+        "Model Prob%": 11, "MC Win%": 12,
+        "Confirmed": 13, "Result": 14, "Notes": 15,
     }
     aligned = []
     for row in new_rows:
