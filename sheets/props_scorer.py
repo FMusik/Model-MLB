@@ -219,13 +219,20 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
         print(f"  ⚠️  Tracker missing key column ({e}) — skipping sync")
         return
 
+    # Build dedup key set from existing Tracker rows.
+    # Keyed by (Player, Line, Side) only — intentionally ignoring Date so that
+    # if the same player appears in Best Bets across two consecutive days (e.g.
+    # game still in odds feed), they don't get added to Tracker again with a
+    # new date stamp. A player+line+side combo should only ever appear once per
+    # game regardless of which day the scorer runs.
     existing_keys = set()
     for row in tracker_values[1:]:
-        if max(t_date_idx, t_player_idx, t_line_idx, t_side_idx) >= len(row):
+        if max(t_player_idx, t_line_idx, t_side_idx) >= len(row):
             continue
-        existing_keys.add(_dedup_key(
-            row[t_date_idx], row[t_player_idx],
-            row[t_line_idx], row[t_side_idx],
+        existing_keys.add((
+            normalize_name(row[t_player_idx]),
+            _normalize_line(row[t_line_idx]),
+            str(row[t_side_idx]).strip().lower(),
         ))
 
     # Map Best Bets columns
@@ -251,11 +258,10 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
     for row in bb_values[1:]:
         if max(bb_player_idx, bb_line_idx, bb_side_idx) >= len(row):
             continue
-        key = _dedup_key(
-            today_str,
-            row[bb_player_idx],
-            row[bb_line_idx],
-            row[bb_side_idx],
+        key = (
+            normalize_name(row[bb_player_idx]),
+            _normalize_line(row[bb_line_idx]),
+            str(row[bb_side_idx]).strip().lower(),
         )
         if key in existing_keys:
             continue
