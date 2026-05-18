@@ -532,11 +532,13 @@ def main(argv=None):
     # Create tab with header if it was accidentally deleted or never existed
     ws = _get_or_create_tracker(sheet)
 
-    # Sync today's Best Bets rows into Tracker (append-only, no duplicates)
-    sync_best_bets_to_tracker(sheet, ws, target_dates[0] if len(target_dates) == 1 else today_et())
+    # Sync today's Best Bets rows into Tracker (append-only, no duplicates).
+    # Always uses today's ET date — Best Bets only ever contains today's plays.
+    sync_best_bets_to_tracker(sheet, ws, today_et())
 
+    # Re-read after sync so newly appended rows are visible to the scorer
     all_values = ws.get_all_values()
-    if not all_values or all_values == [MANUAL_TRACKER_HEADERS]:
+    if not all_values or len(all_values) <= 1:
         print(f"  ⚠️  {MANUAL_TRACKER_TAB} has no data rows to score")
         return
 
