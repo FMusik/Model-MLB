@@ -220,20 +220,32 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
         return
 
     # Build dedup key set from existing Tracker rows.
-    # Keyed by (Player, Line, Side) only — intentionally ignoring Date so that
-    # if the same player appears in Best Bets across two consecutive days (e.g.
-    # game still in odds feed), they don't get added to Tracker again with a
-    # new date stamp. A player+line+side combo should only ever appear once per
-    # game regardless of which day the scorer runs.
-    existing_keys = set()
+    # Keyed by (Date, Player, Line, Side) — same as before.
+    # Additionally track (Player, Line, Side) for any row that already has a
+    # real result (WIN/LOSS/PUSH) so we don't re-add the same game with a new
+    # date stamp if the odds feed carries it over from the previous day.
+    existing_keys   = set()  # (date, player, line, side) — exact match
+    scored_keys     = set()  # (player, line, side) — has a real result already
+    result_col_idx  = tracker_header.index("Result") if "Result" in tracker_header else None
+
     for row in tracker_values[1:]:
         if max(t_player_idx, t_line_idx, t_side_idx) >= len(row):
             continue
-        existing_keys.add((
-            normalize_name(row[t_player_idx]),
-            _normalize_line(row[t_line_idx]),
-            str(row[t_side_idx]).strip().lower(),
+        existing_keys.add(_dedup_key(
+            row[t_date_idx] if t_date_idx < len(row) else "",
+            row[t_player_idx],
+            row[t_line_idx],
+            row[t_side_idx],
         ))
+        # Mark as scored if result is WIN/LOSS/PUSH
+        if result_col_idx is not None and result_col_idx < len(row):
+            res = str(row[result_col_idx]).strip().upper()
+            if res in ("WIN", "LOSS", "PUSH"):
+                scored_keys.add((
+                    normalize_name(row[t_player_idx]),
+                    _normalize_line(row[t_line_idx]),
+                    str(row[t_side_idx]).strip().lower(),
+                ))
 
     # Map Best Bets columns
     bb_header = bb_values[0]
@@ -258,14 +270,16 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
     for row in bb_values[1:]:
         if max(bb_player_idx, bb_line_idx, bb_side_idx) >= len(row):
             continue
-        key = (
+        date_key = _dedup_key(today_str, row[bb_player_idx], row[bb_line_idx], row[bb_side_idx])
+        no_date_key = (
             normalize_name(row[bb_player_idx]),
             _normalize_line(row[bb_line_idx]),
             str(row[bb_side_idx]).strip().lower(),
         )
-        if key in existing_keys:
+        # Skip if already in Tracker for today, or already has a real result
+        if date_key in existing_keys or no_date_key in scored_keys:
             continue
-        existing_keys.add(key)
+        existing_keys.add(date_key)
 
         def _safe(idx):
             return row[idx] if idx < len(row) else ""
