@@ -553,8 +553,9 @@ def main(argv=None):
     ws = _get_or_create_tracker(sheet)
 
     # Sync today's Best Bets rows into Tracker (append-only, no duplicates).
-    # Always uses today's ET date — Best Bets only ever contains today's plays.
-    sync_best_bets_to_tracker(sheet, ws, today_et())
+    # Only runs in normal/single-date mode — backfill is for scoring old rows only.
+    if not args.backfill:
+        sync_best_bets_to_tracker(sheet, ws, today_et())
 
     # Re-read after sync so newly appended rows are visible to the scorer
     all_values = ws.get_all_values()
@@ -679,6 +680,125 @@ def main(argv=None):
             f"({no_data} games still live, {no_id} unmapped)"
         )
 
+    # Score parlay tab after tracker is updated
+    score_parlay_tab(sheet, target_dates)
+
+
+def score_parlay_tab(sheet, target_dates: list):
+    """Fill in Leg Result and Parlay Result in 🎰 Parlays tab.
+
+    Reads Leg Result from 📊 Tracker by matching (Date, Player, Line, Side).
+    Parlay Result = WIN if all legs WIN, LOSS if any leg LOSS, PENDING otherwise.
+    Never deletes or clears existing rows.
+    """
+    PARLAY_TAB = "🎰 Parlays"
+    TRACKER_TAB = "📊 Tracker"
+    target_set = set(target_dates)
+
+    try:
+        parlay_ws = sheet.worksheet(PARLAY_TAB)
+    except gspread.WorksheetNotFound:
+        print(f"  ⚠️  {PARLAY_TAB} tab not found — skipping parlay scoring")
+        return
+
+    parlay_values = parlay_ws.get_all_values()
+    if len(parlay_values) <= 1:
+        print(f"  ⚠️  {PARLAY_TAB}: no data rows")
+        return
+
+    parlay_header = parlay_values[0]
+    try:
+        p_date_idx    = parlay_header.index("Date")
+        p_parlay_idx  = parlay_header.index("Parlay")
+        p_player_idx  = parlay_header.index("Player")
+        p_line_idx    = parlay_header.index("Line")
+        p_side_idx    = parlay_header.index("Side")
+        p_legres_idx  = parlay_header.index("Leg Result")
+        p_parlres_idx = parlay_header.index("Parlay Result")
+    except ValueError as e:
+        print(f"  ⚠️  {PARLAY_TAB} missing column ({e}) — skipping")
+        return
+
+    # Build result lookup from Tracker: (date, player, line, side) → result
+    tracker_results: dict = {}
+    try:
+        tracker_ws = sheet.worksheet(TRACKER_TAB)
+        tracker_values = tracker_ws.get_all_values()
+        if len(tracker_values) > 1:
+            t_header = tracker_values[0]
+            try:
+                t_date_idx   = t_header.index("Date")
+                t_player_idx = t_header.index("Player")
+                t_line_idx   = t_header.index("Line")
+                t_side_idx   = t_header.index("Side")
+                t_result_idx = t_header.index("Result")
+                for row in tracker_values[1:]:
+                    if max(t_date_idx, t_player_idx, t_line_idx, t_side_idx, t_result_idx) >= len(row):
+                        continue
+                    key = _dedup_key(row[t_date_idx], row[t_player_idx], row[t_line_idx], row[t_side_idx])
+                    tracker_results[key] = str(row[t_result_idx]).strip().upper()
+            except ValueError:
+                pass
+    except gspread.WorksheetNotFound:
+        print(f"  ⚠️  {TRACKER_TAB} not found — can't score parlays")
+        return
+
+    # Group parlay rows by (date, parlay_label)
+    groups: dict = {}  # (date, parlay_label) → list of (sheet_row, row)
+    for i, row in enumerate(parlay_values[1:], start=2):
+        if max(p_date_idx, p_parlay_idx, p_player_idx, p_line_idx, p_side_idx) >= len(row):
+            continue
+        if row[p_date_idx] not in target_set:
+            continue
+        key = (row[p_date_idx], row[p_parlay_idx])
+        groups.setdefault(key, []).append((i, row))
+
+    if not groups:
+        print(f"  ⚠️  {PARLAY_TAB}: no rows for target dates")
+        return
+
+    updates = []
+    leg_res_col    = _col_letter(p_legres_idx + 1)
+    parlay_res_col = _col_letter(p_parlres_idx + 1)
+
+    for (date, parlay_label), members in groups.items():
+        leg_results = []
+        for sheet_row, row in members:
+            # Skip if already scored
+            existing_leg = str(row[p_legres_idx]).strip().upper() if p_legres_idx < len(row) else ""
+            if existing_leg in ("WIN", "LOSS", "PUSH"):
+                leg_results.append(existing_leg)
+                continue
+
+            key = _dedup_key(date, row[p_player_idx], row[p_line_idx], row[p_side_idx])
+            result = tracker_results.get(key, "")
+            if result in ("WIN", "LOSS", "PUSH"):
+                updates.append({"range": f"{leg_res_col}{sheet_row}", "values": [[result]]})
+                leg_results.append(result)
+                print(f"  ✅ Parlay leg {date} {row[p_player_idx]}: {result}")
+            else:
+                leg_results.append("PENDING")
+
+        # Score overall parlay result
+        if all(r == "WIN" for r in leg_results):
+            parlay_result = "WIN"
+        elif any(r == "LOSS" for r in leg_results):
+            parlay_result = "LOSS"
+        else:
+            parlay_result = "PENDING"
+
+        # Write parlay result to first leg row only
+        first_sheet_row = members[0][0]
+        existing_parlay = str(members[0][1][p_parlres_idx]).strip().upper() if p_parlres_idx < len(members[0][1]) else ""
+        if existing_parlay not in ("WIN", "LOSS"):
+            updates.append({"range": f"{parlay_res_col}{first_sheet_row}", "values": [[parlay_result]]})
+            print(f"  🎰 Parlay {date} ({parlay_label}): {parlay_result}")
+
+    if updates:
+        parlay_ws.batch_update(updates, value_input_option="USER_ENTERED")
+        print(f"  ✅ {PARLAY_TAB}: {len(updates)} cell(s) updated")
+    else:
+        print(f"  ⚠️  {PARLAY_TAB}: nothing to update")
 
 if __name__ == "__main__":
     main()
