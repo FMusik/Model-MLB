@@ -868,6 +868,37 @@ def build_best_bets(rows):
     return bests
 
 
+def write_best_bets(sheet, best_rows):
+    end_col = _col_letter(len(BEST_HEADERS))
+    print(f"  🔧 BEST_HEADERS ({len(BEST_HEADERS)} cols): {BEST_HEADERS}")
+    ws = _get_or_create_ws(sheet, BEST_TAB, cols=max(20, len(BEST_HEADERS)))
+    ws.clear()
+    ws.update(range_name=f"A1:{end_col}1", values=[BEST_HEADERS], value_input_option="USER_ENTERED")
+
+    # Dedup by (Player, normLine, Side). BEST_HEADERS: Player=1, Line=4, Side=5, Edge%=10
+    best_for_key: dict = {}; key_order: list = []; ungroupable: list = []
+    for b in best_rows:
+        if len(b) <= 10:
+            ungroupable.append(b); continue
+        key = (b[1], _normalize_line(b[4]), b[5])
+        new_edge = b[10] if isinstance(b[10], (int, float)) else -float("inf")
+        if key not in best_for_key:
+            best_for_key[key] = b; key_order.append(key)
+        else:
+            existing_edge = best_for_key[key][10] if isinstance(best_for_key[key][10], (int, float)) else -float("inf")
+            if new_edge > existing_edge:
+                best_for_key[key] = b
+    deduped = ungroupable + [best_for_key[k] for k in key_order]
+    dupes   = len(best_rows) - len(deduped)
+    if dupes:
+        print(f"  🧹 {BEST_TAB}: collapsed {dupes} duplicate row(s) — kept highest Edge%")
+
+    if deduped:
+        end_row = 1 + len(deduped)
+        ws.update(range_name=f"A2:{end_col}{end_row}", values=deduped, value_input_option="USER_ENTERED")
+    print(f"  ✅ {BEST_TAB}: {len(deduped)} rows written (Confirmed=YES only)")
+
+
 # ── PARLAY PICKS ───────────────────────────────────────────────
 def build_parlay_picks(best_rows, today_str: str) -> list:
     """Select 2-3 leg daily parlay from Best Bets rows.
