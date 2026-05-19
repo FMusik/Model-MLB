@@ -53,7 +53,12 @@ PITCHER_ADJUST     = 0.40
 PITCHER_MATCHUP_PA = 25
 TODAY_TAB          = "Props Today"
 BEST_TAB           = "🎯 Best Bets"
+PARLAY_TAB         = "🎰 Parlays"
 MANUAL_TRACKER_TAB = "📊 Tracker"  # populated by props_scorer.py only — model never writes here
+
+# Thresholds for parlay qualification
+PARLAY_MIN_COMPOSITE  = 95.0
+PARLAY_MIN_MODEL_PROB = 70.0
 
 # Full scouting card dump — every signal the model uses, visible in one row.
 # Groups: Identity | Prop | Batter Statcast | BA Splits | Pitcher Matchup |
@@ -127,6 +132,14 @@ BEST_HEADERS = [
     "Result", "Notes",
 ]
 
+
+
+PARLAY_HEADERS = [
+    "Date", "Parlay", "Leg", "Player", "Team", "Game", "Line", "Side",
+    "Composite Score", "Model Prob%", "MC Win%",
+    "Best Odds", "Best Book",
+    "Leg Result", "Parlay Result", "Notes",
+]
 
 
 def format_game_time(iso_str: str) -> str:
@@ -855,7 +868,121 @@ def build_best_bets(rows):
     return bests
 
 
-def write_best_bets(sheet, best_rows):
+# ── PARLAY PICKS ───────────────────────────────────────────────
+def build_parlay_picks(best_rows, today_str: str) -> list:
+    """Select 2-3 leg daily parlay from Best Bets rows.
+
+    Qualification: Composite >= PARLAY_MIN_COMPOSITE AND Model Prob% >= PARLAY_MIN_MODEL_PROB.
+    Ranked by Composite * Model Prob% combined score.
+    Returns a flat list of rows matching PARLAY_HEADERS, grouped by parlay.
+
+    BEST_HEADERS indices used:
+      0=Game Time  1=Player  2=Team  3=Game  4=Line  5=Side
+      6=Best Odds  7=Best Book  8=Composite Score  9=Rating
+      10=Edge%  11=Kelly Units  12=Model Prob%  13=MC Win%
+    """
+    qualified = []
+    for r in best_rows:
+        if len(r) < 14:
+            continue
+        try:
+            composite  = float(r[8])
+            model_prob = float(r[12])
+        except (TypeError, ValueError):
+            continue
+        if composite >= PARLAY_MIN_COMPOSITE and model_prob >= PARLAY_MIN_MODEL_PROB:
+            combined = composite * model_prob
+            qualified.append((combined, r))
+
+    if len(qualified) < 2:
+        print(f"  ⚠️  {PARLAY_TAB}: only {len(qualified)} qualifying play(s) — need at least 2 for a parlay")
+        return []
+
+    # Sort by combined score descending
+    qualified.sort(key=lambda x: x[0], reverse=True)
+
+    # Decide 2-leg vs 3-leg:
+    # If top 3 are all very close (within 5% of each other's combined score), suggest 3-leg
+    # Otherwise stick with 2-leg for safety
+    top3_scores = [s for s, _ in qualified[:3]]
+    if (len(qualified) >= 3 and
+            (top3_scores[0] - top3_scores[2]) / top3_scores[0] < 0.05):
+        legs = qualified[:3]
+        parlay_label = "3-Leg"
+    else:
+        legs = qualified[:2]
+        parlay_label = "2-Leg"
+
+    print(f"  🎰 {PARLAY_TAB}: {parlay_label} parlay — {len(qualified)} qualifying plays, top {len(legs)} selected")
+
+    out = []
+    for i, (score, r) in enumerate(legs, start=1):
+        out.append([
+            today_str,          # Date
+            parlay_label,       # Parlay
+            i,                  # Leg
+            r[1],               # Player
+            r[2],               # Team
+            r[3],               # Game
+            r[4],               # Line
+            r[5],               # Side
+            r[8],               # Composite Score
+            r[12],              # Model Prob%
+            r[13],              # MC Win%
+            r[6],               # Best Odds
+            r[7],               # Best Book
+            "",                 # Leg Result (filled by scorer)
+            "",                 # Parlay Result (filled by scorer)
+            "",                 # Notes
+        ])
+    return out
+
+
+def write_parlay_picks(sheet, parlay_rows, today_str: str):
+    """Append today's parlay to 🎰 Parlays tab. Never clears existing rows.
+    Deduped by Date so re-runs don't add duplicate parlays for the same day.
+    """
+    n_cols  = len(PARLAY_HEADERS)
+    end_col = _col_letter(n_cols)
+
+    try:
+        ws         = sheet.worksheet(PARLAY_TAB)
+        all_values = ws.get_all_values()
+        first_row  = all_values[0] if all_values else []
+    except gspread.WorksheetNotFound:
+        print(f"  ➕ {PARLAY_TAB}: creating tab with header")
+        ws = sheet.add_worksheet(title=PARLAY_TAB, rows=5000, cols=max(20, n_cols))
+        ws.update(range_name=f"A1:{end_col}1", values=[PARLAY_HEADERS], value_input_option="USER_ENTERED")
+        first_row  = list(PARLAY_HEADERS)
+        all_values = [first_row]
+
+    if not first_row:
+        ws.update(range_name=f"A1:{end_col}1", values=[PARLAY_HEADERS], value_input_option="USER_ENTERED")
+        first_row  = list(PARLAY_HEADERS)
+        all_values = [first_row]
+
+    # Check if today already has parlay rows — skip if so
+    date_idx = first_row.index("Date") if "Date" in first_row else 0
+    existing_dates = {row[date_idx] for row in all_values[1:] if date_idx < len(row)}
+    if today_str in existing_dates:
+        print(f"  ⚠️  {PARLAY_TAB}: parlay for {today_str} already exists — skipping")
+        return
+
+    if not parlay_rows:
+        print(f"  ⚠️  {PARLAY_TAB}: no qualifying parlay for {today_str}")
+        return
+
+    # Align to sheet column order
+    aligned = []
+    for row in parlay_rows:
+        d = dict(zip(PARLAY_HEADERS, row))
+        aligned.append([d.get(col, "") for col in first_row])
+
+    ws.append_rows(aligned, value_input_option="USER_ENTERED")
+    print(f"  ✅ {PARLAY_TAB}: wrote {len(aligned)}-leg parlay for {today_str}")
+
+
+
     end_col = _col_letter(len(BEST_HEADERS))
     print(f"  🔧 BEST_HEADERS ({len(BEST_HEADERS)} cols): {BEST_HEADERS}")
     ws = _get_or_create_ws(sheet, BEST_TAB, cols=max(20, len(BEST_HEADERS)))
@@ -956,10 +1083,12 @@ def main():
 
     rated  = [r for r in rows if r[36] in ("ELITE","STRONG","LEAN")]
     bests  = build_best_bets(rated)
+    parlay = build_parlay_picks(bests, datetime.date.today().isoformat())
 
     sheet = get_sheet()
     write_today(sheet, rated)
     write_best_bets(sheet, bests)
+    write_parlay_picks(sheet, parlay, datetime.date.today().isoformat())
 
     edges  = sum(1 for r in rows if r[34])             # Edge Flag index
     elite  = sum(1 for r in rated if r[36] == "ELITE")
@@ -970,6 +1099,7 @@ def main():
         f"{edges} flagged edges >= {int(EDGE_THRESHOLD*100)}% | "
         f"ELITE: {elite}, STRONG: {strong}, LEAN: {lean} | "
         f"Best Bets: {len(bests)} (Confirmed=YES only) | "
+        f"Parlay: {len(parlay)}-leg | "
         f"📊 Tracker populated by props_scorer.py only"
     )
 
