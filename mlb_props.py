@@ -1011,15 +1011,6 @@ def write_parlay_picks(sheet, parlay_rows, today_str: str):
 
     ws.append_rows(aligned, value_input_option="USER_ENTERED")
     print(f"  ✅ {PARLAY_TAB}: wrote {len(aligned)}-leg parlay for {today_str}")
-    deduped = ungroupable + [best_for_key[k] for k in key_order]
-    dupes   = len(best_rows) - len(deduped)
-    if dupes:
-        print(f"  🧹 {BEST_TAB}: collapsed {dupes} duplicate row(s) — kept highest Edge%")
-
-    if deduped:
-        end_row = 1 + len(deduped)
-        ws.update(range_name=f"A2:{end_col}{end_row}", values=deduped, value_input_option="USER_ENTERED")
-    print(f"  ✅ {BEST_TAB}: {len(deduped)} rows written (Confirmed=YES only)")
 
 
 # ── PROPS TRACKER REMOVED ──────────────────────────────────────
