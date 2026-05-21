@@ -237,8 +237,11 @@ def sync_best_bets_to_tracker(sheet, tracker_ws, today_str: str):
             row[t_line_idx],
             row[t_side_idx],
         ))
-        # Mark as scored if result is WIN/LOSS/PUSH
-        if result_col_idx is not None and result_col_idx < len(row):
+        # Mark as scored if result is WIN/LOSS/PUSH on a PAST date only.
+        # We don't block today's date — a player can appear in Best Bets today
+        # even if they played yesterday.
+        row_date = row[t_date_idx] if t_date_idx < len(row) else ""
+        if row_date != today_str and result_col_idx is not None and result_col_idx < len(row):
             res = str(row[result_col_idx]).strip().upper()
             if res in ("WIN", "LOSS", "PUSH"):
                 scored_keys.add((
