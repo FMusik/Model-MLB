@@ -819,7 +819,8 @@ def build_rows(props, bpp, pitchers, confirmed_map=None, savant_xba=None,
 
 # ── BEST BETS ──────────────────────────────────────────────────
 def build_best_bets(rows):
-    """Confirmed=YES + ELITE/STRONG + Kelly>0 + Edge>0.
+    """Filters: Confirmed=YES, ELITE only, Line=1.5 only,
+    Composite>=95, Model Prob%>=70, Kelly>0, Edge>0.
     One row per player (highest Edge%). Sorted Game Time ASC, Composite DESC.
 
     BEST_HEADERS indices:
@@ -830,13 +831,22 @@ def build_best_bets(rows):
     """
     by_player = {}
     for r in rows:
-        if r[36] not in ("ELITE", "STRONG"):        # Rating
+        if r[36] != "ELITE":                            # ELITE only
             continue
-        if (r[41] if len(r) > 41 else "") != "YES": # Confirmed
+        if (r[41] if len(r) > 41 else "") != "YES":    # Confirmed only
             continue
-        if not isinstance(r[37], (int, float)) or r[37] <= 0:  # Kelly
+        if r[8] != 1.5:                                 # Line 1.5 only
             continue
-        if not isinstance(r[33], (int, float)) or r[33] <= 0:  # Edge%
+        try:
+            if float(r[35]) < 95.0:                     # Composite >= 95
+                continue
+            if float(r[32]) < 70.0:                     # Model Prob% >= 70
+                continue
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(r[37], (int, float)) or r[37] <= 0:  # Kelly > 0
+            continue
+        if not isinstance(r[33], (int, float)) or r[33] <= 0:  # Edge% > 0
             continue
         key = r[2]
         if key not in by_player or r[33] > by_player[key][33]:
