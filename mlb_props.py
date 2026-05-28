@@ -464,7 +464,28 @@ def get_batter_hits_props():
     if not isinstance(events, list): sys.exit(f"❌ Unexpected events response: {events}")
     today  = datetime.date.today().isoformat()
     todays = [e for e in events if str(e.get("commence_time","")).startswith(today)]
-    print(f"   {len(todays)} events today")
+
+    # Filter out games that have already started
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    upcoming = []
+    skipped_live = 0
+    for e in todays:
+        ct = e.get("commence_time","")
+        try:
+            s  = ct.replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            if dt <= now_utc:
+                skipped_live += 1
+                continue
+        except Exception:
+            pass
+        upcoming.append(e)
+    if skipped_live:
+        print(f"   ⏭️  Skipped {skipped_live} game(s) already started")
+    todays = upcoming
+    print(f"   {len(todays)} events today (not yet started)")
     rows = []; remaining = "?"
     for ev in todays:
         eid = ev.get("id")
