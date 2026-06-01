@@ -614,7 +614,19 @@ def main(argv=None):
         gamelog = fetch_player_gamelog(pid, season, session, gamelog_cache)
         entry   = gamelog.get(target_date)
 
+        # Always check game status first — never score a game in progress
+        player_team = info.get("team", "")
+        team_status = ""
+        if player_team:
+            statuses    = fetch_team_game_statuses(target_date, session, status_cache)
+            team_status = statuses.get(player_team, "")
+        game_final = team_status == "Final"
+
         if entry is not None and entry[1] > 0:
+            # Only score if game is confirmed final
+            if not game_final:
+                no_data += 1
+                continue
             hits   = entry[0]
             result = score_result(line, side, hits)
             if not result: continue
@@ -622,13 +634,6 @@ def main(argv=None):
             scored += 1
             print(f"  ✅ {target_date} {player}: {side} {line} | hits={hits} → {result}")
             continue
-
-        player_team = info.get("team", "")
-        team_status = ""
-        if player_team:
-            statuses    = fetch_team_game_statuses(target_date, session, status_cache)
-            team_status = statuses.get(player_team, "")
-        game_final = team_status == "Final"
 
         if entry is not None and entry[1] == 0:
             if confirmed == "YES" and not game_final:
