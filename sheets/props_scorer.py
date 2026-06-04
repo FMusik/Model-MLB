@@ -623,8 +623,12 @@ def main(argv=None):
         game_final = team_status == "Final"
 
         if entry is not None and entry[1] > 0:
-            # Only score if game is confirmed final
-            if not game_final:
+            # Only score if game is confirmed final — or if we can't get team
+            # status but the target date is clearly in the past (>= 1 day ago)
+            from datetime import date as _date
+            target_dt = _date.fromisoformat(target_date)
+            is_past   = target_dt < _date.today()
+            if not game_final and not (is_past and not player_team):
                 no_data += 1
                 continue
             hits   = entry[0]
